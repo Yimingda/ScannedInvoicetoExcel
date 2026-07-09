@@ -511,6 +511,475 @@ def _column_major_order(boxes: List[List[int]]) -> List[Tuple[int, int, int, int
     return out
 
 
+# ================================================================
+# 路线A：整页 OCR 行 → 票据聚类 → 旋转矩形（处理物理叠压/倾斜的小票）
+#
+# 核心先验：每张热敏小票是一个固定宽度的长方形（57/80mm 纸 @200dpi
+# 文字横向跨度约 340~680px）。即使局部被另一张票遮挡，可见文字行的
+# x 跨度 + 行距连续性也足以把它们分开。
+# 三阶段：
+#   1) 纵向成链：x 重叠且行距小的 OCR 行连成「条带」（票内段落）；
+#   2) 横向拼列：条带按「票宽先验」拼成完整票（标签列+数值列）。
+#      已达完整票宽的条带拒绝吞并旁边的碎条带——防止把相邻票的
+#      数值列桥接过来（叠压票最常见的错误）；
+#   3) 堆叠校验：纵向相邻的组若不满足「上组含总额 & 下组头部含
+#      日期/刷卡回执头」则并回同一张票；琐碎残片就近吸收。
+# ================================================================
+
+RECEIPT_MAX_W = 680       # 票面文字横向跨度上限 @200dpi（80mm 纸 ~630px + 容差）
+RECEIPT_FULL_W = 340      # 文字跨度达到该值即可能自成一张「完整票」@200dpi
+V_GAP_BREAK = 100.0       # 纵向断带阈值 @200dpi：票内段距 < 它 < 叠压票接缝的空隙
+V_LINK_XOV = 0.5          # 纵向成链所需 x 重叠（相对较窄行宽度的比例）
+H_GAP_MAX = 340.0         # 同票「标签列↔数值列」最大横向净距 @200dpi
+H_YOV_MIN = 0.45          # 横向拼列所需 y 重叠（相对较矮条带 y 跨度的比例）
+FRAG_PAIR_GAP = 150.0     # 两个「都不完整」的碎条带可直接合并的最大横向净距 @200dpi
+# 纵向堆叠组净距小于它时视为「同票被切碎」候选并做接缝校验。
+# 必须略大于 V_GAP_BREAK（碎片间隙 ≤ ~75px），且小于真实票缝（实测 ≥ ~115px）
+STACK_CHECK_GAP = 108.0
+ABSORB_X_EXPAND = 40.0    # 碎块吸收：候选目标组 x 区间的外扩量 @200dpi
+WEAK_SCORE = 0.60         # 分数低且极短的行多为手写圈码——禁止其参与成链（防桥接）
+TYPICAL_LINE_H = 25.0     # 200dpi 下小票正文行高的典型值，用于按行高推算尺度因子
+
+
+def _trace(msg: str) -> None:
+    import os
+    if os.environ.get("INVSCAN_TRACE"):
+        print("[seg]", msg)
+
+
+def _gdesc(g: List[Dict[str, Any]]) -> str:
+    gb = _gbox(g)
+    t = " | ".join(b.get("text", "")[:12] for b in g[:2])
+    return f"[{gb[0]:.0f},{gb[1]:.0f},{gb[2]:.0f},{gb[3]:.0f}]n{len(g)}({t})"
+
+
+def _gbox(g: List[Dict[str, Any]]) -> List[float]:
+    return [min(b["box"][0] for b in g), min(b["box"][1] for b in g),
+            max(b["box"][2] for b in g), max(b["box"][3] for b in g)]
+
+
+def _joined_text(g: List[Dict[str, Any]]) -> str:
+    return " ".join(b.get("text", "") for b in g)
+
+
+def _has_date(g: List[Dict[str, Any]]) -> bool:
+    from . import parse as _p
+    return bool(_p.extract_dates(_joined_text(g)))
+
+
+def _row_pairs(a: List[Dict[str, Any]], b: List[Dict[str, Any]],
+               h_med: float) -> int:
+    """两组行里「处于同一水平线」的行对数（票的标签列/数值列逐行对齐）。"""
+    n = 0
+    for la in a:
+        ca = (la["box"][1] + la["box"][3]) / 2
+        for lb in b:
+            cb = (lb["box"][1] + lb["box"][3]) / 2
+            if abs(ca - cb) <= 0.7 * h_med:
+                n += 1
+                break
+    return n
+
+
+def _has_money(g: List[Dict[str, Any]]) -> bool:
+    """组内是否有「带小数的金额」行（碎片是否携带关键信息）。"""
+    from . import parse as _p
+    for b in g:
+        for _v, _f, _c, no_sep in _p.amounts_in_row(b.get("text", "")):
+            if not no_sep:
+                return True
+    return False
+
+
+def _lower_head_ok(g: List[Dict[str, Any]]) -> bool:
+    """作为「下方另一张票的开头」是否合法：头部有日期/发票头，或是刷卡回执头。
+
+    日期窗口取上部 60%——热敏票常以大幅 LOGO 开头，日期行偏下。
+    """
+    if _texts_have_date(g, top_ratio=0.6):
+        return True
+    import re
+    from . import parse as _p
+    head = " ".join(b.get("text", "") for b in
+                    sorted(g, key=lambda b: b["box"][1])[:10])
+    if re.search(r"\bD[:;]\s?\d\d", head):    # 刷卡回执的日期行 D:25-03-26
+        return True
+    canon = _p._canon_kw(head)
+    return any(k in canon for k in ("customer copy", "approved", "tax invoice",
+                                    "vat invoice", "fnb", "nedbank"))
+
+
+def cluster_receipts(lines: List[Dict[str, Any]],
+                     dpi_scale: float = 1.0
+                     ) -> List[List[Dict[str, Any]]] | None:
+    """整页 OCR 行 → 每张小票一个行组（列优先顺序）。
+
+    不依赖墨迹投影（叠压票之间没有空白带可投影），只用 OCR 行的
+    几何关系 + 票宽先验。返回 None 表示行数太少，不适用本算法。
+    """
+    boxes = [l for l in lines if l.get("text", "").strip()]
+    if len(boxes) < 8:
+        return None
+    heights = [b["box"][3] - b["box"][1] for b in boxes]
+    h_med = median(heights)
+    # 尺度因子：横向票宽先验按 200dpi 像素标定。dpi_scale 只反映 PDF 渲染
+    # 配置，对「直接上传的图片」（手机照片/高分辨率扫描）恒为 1——必须按
+    # 页面自身行高推算（200dpi 小票行高 ≈ 25px），否则高分辨率单票会因
+    # 超出票宽上限被拆成「标签列+数值列」两条残缺记录。
+    # 死区：行高比 < 1.35 视为正常字号波动、不放大（否则 200dpi 页面上
+    # 字号略大的票会把 STACK_CHECK_GAP 等阈值推过真实票缝，引发误合并——
+    # 实测第2页 ⑤⑥ 两票 116px 的接缝就毁于 s≈1.1）。
+    s_line = h_med / TYPICAL_LINE_H
+    if s_line < 1.35:
+        s_line = 1.0
+    s = max(dpi_scale, s_line, 0.2)
+    gv = max(V_GAP_BREAK * s, 3.5 * h_med)   # 纵向断带阈值（自适应行高）
+
+    # 适用性守卫 a：存在横跨超过票宽上限的单行 → A4 宽幅版式（如增值税
+    # 发票整页表格），本算法的窄票先验不适用，交回旧的墨迹投影路径。
+    for b in boxes:
+        if (b["box"][2] - b["box"][0]) > RECEIPT_MAX_W * s * 1.15:
+            return None
+
+    # ---- 1) 纵向成链（并查集） ----
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def weak(l):   # 低分极短行（手写圈码/污渍）：不许当「桥」，只能被吸收
+        return (l.get("score", 1.0) < WEAK_SCORE
+                and len(l.get("text", "").strip()) <= 4)
+
+    for i in range(n):
+        if weak(boxes[i]):
+            continue
+        bi = boxes[i]["box"]
+        for j in range(i + 1, n):
+            if weak(boxes[j]):
+                continue
+            bj = boxes[j]["box"]
+            xov = min(bi[2], bj[2]) - max(bi[0], bj[0])
+            if xov < V_LINK_XOV * min(bi[2] - bi[0], bj[2] - bj[0]):
+                continue
+            vgap = max(bi[1], bj[1]) - min(bi[3], bj[3])
+            # 同一行被 OCR 切成两块（vgap<0）或相邻行/段（vgap<=gv）都成链
+            if vgap <= gv and vgap >= -1.2 * h_med:
+                parent[find(j)] = find(i)
+
+    strips: Dict[int, List[int]] = {}
+    for i in range(n):
+        strips.setdefault(find(i), []).append(i)
+    groups: List[List[Dict[str, Any]]] = [[boxes[k] for k in g]
+                                          for g in strips.values()]
+
+    def fit_g(g: List[Dict[str, Any]]) -> bool:
+        """条带是否已像「完整票」：宽度达标 且 含金额行。
+        纯标签列可以和票一样宽（如 Amount Tendered:/TOTAL 列），
+        但没有任何金额——仍需并入右侧数值列。"""
+        w = (max(b["box"][2] for b in g) - min(b["box"][0] for b in g))
+        return (RECEIPT_FULL_W * s <= w <= RECEIPT_MAX_W * s
+                and _has_money(g))
+
+    def fit(w: float) -> bool:
+        return RECEIPT_FULL_W * s <= w <= RECEIPT_MAX_W * s
+
+    # ---- 2) 横向拼列（票宽先验驱动的贪心合并） ----
+    def third_party_between(a: int, b: int, A, B) -> bool:
+        """A、B 的横向间隙带（y 取两者交叠区）里是否有第三方条带的行——
+        有则说明 A、B 分属间隙两侧的不同小票，不许跨过去合并。"""
+        gx0, gx1 = min(A[2], B[2]), max(A[0], B[0])
+        gy0, gy1 = max(A[1], B[1]), min(A[3], B[3])
+        if gx1 <= gx0 or gy1 <= gy0:
+            return False
+        for c in range(len(groups)):
+            if c in (a, b):
+                continue
+            for l in groups[c]:
+                cx = (l["box"][0] + l["box"][2]) / 2
+                cy = (l["box"][1] + l["box"][3]) / 2
+                if gx0 < cx < gx1 and gy0 < cy < gy1:
+                    return True
+        return False
+
+    while True:
+        best = None   # (gain, -xgap, a, b)
+        for a in range(len(groups)):
+            A = _gbox(groups[a])
+            for b in range(a + 1, len(groups)):
+                B = _gbox(groups[b])
+                yov = min(A[3], B[3]) - max(A[1], B[1])
+                if yov < H_YOV_MIN * min(A[3] - A[1], B[3] - B[1]):
+                    continue
+                xgap = max(A[0], B[0]) - min(A[2], B[2])   # 净距（重叠为负）
+                if xgap > H_GAP_MAX * s:
+                    continue
+                mw = max(A[2], B[2]) - min(A[0], B[0])
+                if mw > RECEIPT_MAX_W * s:
+                    continue
+                fa, fb = fit_g(groups[a]), fit_g(groups[b])
+                fm = fit(mw) and (_has_money(groups[a]) or _has_money(groups[b]))
+                gain = int(fm) - int(fa) - int(fb)
+                # 碎带凑碎带只允许拼出「窄」结果（数值列+数量列等），
+                # 拼出接近整票宽的组合应由 gain>0（真正凑成整票）负责
+                frag_ok = (not fa and not fb and xgap <= FRAG_PAIR_GAP * s
+                           and mw <= 420 * s)
+                ok = (xgap <= 0 and gain >= 0) or gain > 0 or frag_ok
+                if not ok:
+                    continue
+                if xgap > 0:
+                    # 单行条带跨空隙极易误挂到邻票（它跟谁都 y 重叠）——
+                    # 交给残片吸收阶段按矩形距离归属
+                    if len(groups[a]) < 2 or len(groups[b]) < 2:
+                        continue
+                    # 两侧各自带日期的（多为两张独立票并排）不做跨空隙合并
+                    if _has_date(groups[a]) and _has_date(groups[b]):
+                        continue
+                    # 间隙带里有第三方条带 = 跨票桥接，禁止
+                    if third_party_between(a, b, A, B):
+                        continue
+                    # 远距合并（>150px）须有「标签列↔数值列」的行配对证据：
+                    # 至少 2 对行在同一水平线上（碎片巧合对齐通常只有 1 对）
+                    if (xgap > 150 * s
+                            and _row_pairs(groups[a], groups[b], h_med) < 2):
+                        continue
+                key = (gain, -xgap, a, b)
+                if best is None or key > best:
+                    best = key
+        if best is None:
+            break
+        _g, _x, a, b = best
+        _trace(f"P2 merge gain={_g} xgap={-_x:.0f}: {_gdesc(groups[a])} + {_gdesc(groups[b])}")
+        groups[a].extend(groups[b])
+        del groups[b]
+
+    # ---- 3) 堆叠校验 + 残片吸收 ----
+    groups = _merge_invalid_stacks(groups, s)
+    groups = _absorb_tiny_groups(groups, s)
+    groups = _merge_invalid_stacks(groups, s)
+    # 剩下的纯标签/手写残余组（无金额无日期且行数少）：丢弃——
+    # 它们挂到哪张票都可能污染解析，丢掉不损失关键字段
+    if len(groups) > 1:
+        kept = [g for g in groups
+                if len(g) >= 5 or _has_money(g) or _has_date(g)]
+        if kept:
+            groups = kept
+
+    # 列优先排序
+    def colkey(gs):
+        cols: List[List[float]] = []   # 每列 [x0, x1]
+        order = []
+        for gi in sorted(range(len(gs)), key=lambda k: _gbox(gs[k])[0]):
+            gb = _gbox(gs[gi])
+            placed = None
+            for ci, c in enumerate(cols):
+                ov = min(gb[2], c[1]) - max(gb[0], c[0])
+                if ov > 0.5 * min(gb[2] - gb[0], c[1] - c[0]):
+                    placed = ci
+                    c[0] = min(c[0], gb[0])
+                    c[1] = max(c[1], gb[2])
+                    break
+            if placed is None:
+                cols.append([gb[0], gb[2]])
+                placed = len(cols) - 1
+            order.append((placed, gb[1], gi))
+        # 列按 x0 排序后重编号
+        rank = {ci: r for r, (ci, _) in enumerate(
+            sorted(enumerate(c[0] for c in cols), key=lambda t: t[1]))}
+        return [gi for _, _, gi in sorted(order,
+                                          key=lambda t: (rank[t[0]], t[1]))]
+
+    groups = [sorted(groups[i], key=lambda b: (b["box"][1], b["box"][0]))
+              for i in colkey(groups)]
+
+    # 适用性守卫 b：若有 >=2 个「大组」都既无金额行也无日期/回执特征，
+    # 说明是系统性拆列（表格版式被拆成多条数值列）——整页回退旧路径。
+    # 单个无特征组必须保留：严重褪色的票可能什么关键词都读不出，
+    # 但仍要产出（低置信度）记录交人工——不遗漏优先于整洁。
+    if len(groups) >= 2:
+        featureless_big = sum(
+            1 for g in groups
+            if len(g) >= 5
+            and not (_texts_have_total(g) or _texts_have_date(g, top_ratio=1.0)))
+        if featureless_big >= 2:
+            return None
+    return groups
+
+
+def _merge_invalid_stacks(groups: List[List[Dict[str, Any]]],
+                          s: float) -> List[List[Dict[str, Any]]]:
+    """纵向堆叠的相邻组：若不像「两张完整票的接缝」则并回一张。
+
+    候选按纵向净距从小到大处理——碎片总是先并回贴得最近的一侧
+    （票头碎片距正文比距上一张票近得多）。
+    """
+    while len(groups) > 1:
+        cands = []   # (ygap, a, b)
+        for a in range(len(groups)):
+            A = _gbox(groups[a])
+            for b in range(a + 1, len(groups)):
+                B = _gbox(groups[b])
+                xov = min(A[2], B[2]) - max(A[0], B[0])
+                if xov < 0.4 * min(A[2] - A[0], B[2] - B[0]):
+                    continue
+                if max(A[2], B[2]) - min(A[0], B[0]) > RECEIPT_MAX_W * s:
+                    continue
+                up, lo = (a, b) if A[1] <= B[1] else (b, a)
+                U, L = (A, B) if up == a else (B, A)
+                ygap = L[1] - U[3]           # 负值 = y 交叠
+                if ygap > STACK_CHECK_GAP * s:
+                    continue
+                yov = -ygap
+                deep = yov > 0.25 * min(A[3] - A[1], B[3] - B[1])
+                # 深度 y 交叠 = 同一张票被切碎，直接并；浅间隙做内容校验
+                if not deep:
+                    if _texts_have_total(groups[up]) and _lower_head_ok(groups[lo]):
+                        continue   # 合法接缝：上有总额、下有票头
+                cands.append((max(ygap, -1.0), a, b))
+        if not cands:
+            break
+        _yg, a, b = min(cands)
+        _trace(f"P3 stack ygap={_yg:.0f}: {_gdesc(groups[a])} + {_gdesc(groups[b])}")
+        groups[a].extend(groups[b])
+        del groups[b]
+    return groups
+
+
+def _absorb_tiny_groups(groups: List[List[Dict[str, Any]]],
+                        s: float) -> List[List[Dict[str, Any]]]:
+    """琐碎残片（行数/字数太少，不可能是完整票）就近并入正常组。"""
+    def tiny(g):
+        return len(g) <= 2 or sum(len(b["text"].strip()) for b in g) <= 14
+
+    changed = True
+    while changed and len(groups) > 1:
+        changed = False
+        for i in range(len(groups)):
+            g = groups[i]
+            if not tiny(g):
+                continue
+            gb = _gbox(g)
+            cx = (gb[0] + gb[2]) / 2
+            hosts = [j for j in range(len(groups)) if j != i and not tiny(groups[j])]
+            # 吸收不许把票撑破宽度先验，也不许明显撑宽宿主（>70px 的
+            # 横向外扩说明残片其实骑在两票之间，归属存疑）
+            def x_expand(j):
+                H = _gbox(groups[j])
+                return ((max(gb[2], H[2]) - min(gb[0], H[0]))
+                        - (H[2] - H[0]))
+            def ok_width(j):
+                H = _gbox(groups[j])
+                return (max(gb[2], H[2]) - min(gb[0], H[0])) <= RECEIPT_MAX_W * s
+            safe = [j for j in hosts if ok_width(j) and x_expand(j) <= 70 * s]
+            if not safe:
+                # 无金额也无日期的悬空标签残片：丢弃（挂错票比丢掉更伤）
+                if not _has_date(g) and not _has_money(g):
+                    _trace(f"P3 drop {_gdesc(g)}")
+                    del groups[i]
+                    changed = True
+                    break
+                hosts = [j for j in hosts if ok_width(j)]
+                if not hosts:
+                    continue
+                safe = hosts
+            # 优先落在「x 区间能罩住残片中心」的组里（小票是竖条，残片
+            # 多是本票的行），其中取矩形净距最近者
+            def rect_gap(j):
+                H = _gbox(groups[j])
+                dx = max(0.0, max(gb[0], H[0]) - min(gb[2], H[2]))
+                dy = max(0.0, max(gb[1], H[1]) - min(gb[3], H[3]))
+                return dx + dy
+            within = [j for j in safe
+                      if _gbox(groups[j])[0] - ABSORB_X_EXPAND * s <= cx
+                      <= _gbox(groups[j])[2] + ABSORB_X_EXPAND * s]
+            pool = within or safe
+            j = min(pool, key=rect_gap)
+            _trace(f"P3 absorb {_gdesc(g)} -> {_gdesc(groups[j])}")
+            groups[j].extend(g)
+            del groups[i]
+            changed = True
+            break
+    return groups
+
+
+def deskew_crop(img: "np.ndarray", group: List[Dict[str, Any]],
+                dpi_scale: float = 1.0) -> "np.ndarray":
+    """按行组的角度中位数把小票摆正后裁剪（摆正后重 OCR 质量显著提升）。
+
+    角度取「较长行」的行宽加权中位数（长行的方向估计更可靠；短行/
+    数字块常被检测器回退成 0°）。裁剪范围 = 旋转后所有 quad 点的
+    外接框 + 边距。
+    """
+    import cv2
+    s = max(dpi_scale, 0.2)
+    pts: List[List[float]] = []
+    angs: List[Tuple[float, float]] = []   # (angle, weight=行宽)
+    for l in group:
+        q = l.get("quad")
+        if q:
+            pts.extend(q)
+        else:
+            x0, y0, x1, y1 = l["box"]
+            pts.extend([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+        w = l["box"][2] - l["box"][0]
+        if w >= 120 * s and l.get("angle") is not None:
+            angs.append((float(l["angle"]), w))
+    ang = 0.0
+    if angs:
+        angs.sort()
+        total = sum(w for _, w in angs)
+        acc = 0.0
+        for a, w in angs:
+            acc += w
+            if acc >= total / 2:
+                ang = a
+                break
+    P = np.array(pts, dtype=np.float32)
+    H, W = img.shape[:2]
+    if abs(ang) < 0.3:   # 近乎水平：直接裁剪，省一次整页旋转
+        rot, RP = img, P
+    else:
+        cx, cy = float(P[:, 0].mean()), float(P[:, 1].mean())
+        M = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)  # 正角=逆时针回正
+        rot = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=(255, 255, 255))
+        RP = (P @ M[:, :2].T) + M[:, 2]
+    x0, y0 = RP[:, 0].min(), RP[:, 1].min()
+    x1, y1 = RP[:, 0].max(), RP[:, 1].max()
+    # 边距：横向 3.5% + 10px，纵向 2% + 10px（补半个字符/淡印边缘）
+    mx = 0.035 * (x1 - x0) + 10 * s
+    my = 0.02 * (y1 - y0) + 10 * s
+    xa = int(max(0, x0 - mx)); ya = int(max(0, y0 - my))
+    xb = int(min(W, x1 + mx)); yb = int(min(H, y1 + my))
+    if xb - xa < 20 or yb - ya < 20:
+        return img[int(max(0, y0)):int(min(H, y1)) or H,
+                   int(max(0, x0)):int(min(W, x1)) or W]
+    return np.ascontiguousarray(rot[ya:yb, xa:xb])
+
+
+def ocr_upscale(crop: "np.ndarray",
+                group: List[Dict[str, Any]]) -> Tuple["np.ndarray", float]:
+    """小字放大供重 OCR：识别模型对 ~40px 行高最稳；200dpi 小票行高
+    仅 ~25px，放大后对褪色热敏字/被圈划的数字明显更准。
+    返回 (放大图, 放大倍数)——调用方须把 OCR 框坐标除以倍数还原，
+    保证下游（refine/parse）看到的几何尺度不变。
+    """
+    import cv2
+    hs = [l["box"][3] - l["box"][1] for l in group]
+    h_line = sorted(hs)[len(hs) // 2] if hs else 40.0
+    if h_line >= 34:
+        return crop, 1.0
+    f = min(2.2, 40.0 / max(h_line, 12.0))
+    up = cv2.resize(crop, (int(crop.shape[1] * f), int(crop.shape[0] * f)),
+                    interpolation=cv2.INTER_CUBIC)
+    return up, f
+
+
 def _gap_centers(boxes: List[Dict[str, Any]], axis: int, span: float,
                  max_cover: float, min_gap: float) -> List[float]:
     """某一轴向投影覆盖度的「内部空隙」中心线。axis: 0=x, 1=y。"""

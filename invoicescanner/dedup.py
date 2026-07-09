@@ -67,30 +67,49 @@ def _dates_match(a: Dict[str, Any], b: Dict[str, Any], tol_days: int) -> Optiona
     return any(abs((x - y).days) <= tol_days for x in da for y in db)
 
 
+SUSPECT_GAP_DAYS = 3   # 金额匹配但日期差超容差时，差距 ≤ 它则标「疑似同单」交人工
+
+
 def _same_transaction(a: Dict[str, Any], b: Dict[str, Any],
                       date_tol_days: int) -> Optional[str]:
-    """返回 'dup'（确认同单）/ 'suspect'（疑似）/ None（不同单）。"""
+    """返回 'dup'（确认同单）/ 'suspect'（缺日期疑似）/
+    'suspect_gap'（金额匹配但日期差 1~3 天，发票↔回执对，交人工）/ None。"""
     ta, tb = a.get("total_incl_tax"), b.get("total_incl_tax")
     if ta is None or tb is None:
         return None
     exact = abs(ta - tb) <= 0.011
+    ka, kb = a.get("doc_kind"), b.get("doc_kind")
+    cross = {ka, kb} == {"invoice", "card_slip"}
     if not exact:
         # 小费容差：发票+刷卡小票 组合，刷卡金额 = 票面 + 小费
-        ka, kb = a.get("doc_kind"), b.get("doc_kind")
-        if {ka, kb} != {"invoice", "card_slip"}:
+        if not cross:
             return None
         inv_t, slip_t = (ta, tb) if ka == "invoice" else (tb, ta)
         if not (inv_t < slip_t <= inv_t * TIP_RATIO_MAX):
             return None
         # 金额不等的合并要求日期必须双方都有且匹配（更严格，防误合并）
-        return "dup" if _dates_match(a, b, date_tol_days) else None
+        if _dates_match(a, b, date_tol_days):
+            return "dup"
+        if _dates_match(a, b, SUSPECT_GAP_DAYS):
+            return "suspect_gap"   # 开票常晚于刷卡 1~2 天：不自动合并但要提醒
+        return None
     dm = _dates_match(a, b, date_tol_days)
     if dm is True:
         return "dup"
-    if dm is False:
-        return None
-    # 金额相同但缺日期：不敢确认，交人工
-    return "suspect"
+    if dm is None:
+        # 金额相同但缺日期：不敢确认，交人工
+        return "suspect"
+    if cross and _dates_match(a, b, SUSPECT_GAP_DAYS):
+        return "suspect_gap"
+    return None
+
+
+def _gap_days(a: Dict[str, Any], b: Dict[str, Any]) -> int:
+    """两记录候选日期集合的最小天数差（用于疑似标注文案）。"""
+    da, db = _date_set(a), _date_set(b)
+    if not da or not db:
+        return -1
+    return min(abs((x - y).days) for x in da for y in db)
 
 
 def _append_note(rec: Dict[str, Any], note: str) -> None:
@@ -126,15 +145,24 @@ def deduplicate(records: List[Dict[str, Any]], cfg: Dict[str, Any],
             verdict = _same_transaction(records[i], records[j], tol)
             if verdict == "dup":
                 group[find(j)] = find(i)
-            elif verdict == "suspect":
-                suspects.append((i, j))
+            elif verdict in ("suspect", "suspect_gap"):
+                suspects.append((i, j, verdict))
 
-    # 疑似重复：双方都标注，不合并
-    for i, j in suspects:
+    # 疑似重复：双方都标注，不合并（防止金额被重复计入却无人察觉）
+    for i, j, kind in suspects:
         if find(i) == find(j):
             continue  # 已被确认关系合并
-        _append_note(records[i], f"疑似重复(金额相同,日期缺失): {records[j]['source_file']}")
-        _append_note(records[j], f"疑似重复(金额相同,日期缺失): {records[i]['source_file']}")
+        if kind == "suspect":
+            msg = "疑似重复(金额相同,日期缺失)"
+        else:
+            gap = _gap_days(records[i], records[j])
+            msg = (f"疑似同单(金额匹配,日期相差{gap}天,未自动合并)——"
+                   f"若确为同一笔请删除其一或调大 date_tolerance_days")
+        _append_note(records[i], f"{msg}: {records[j]['source_file']}")
+        _append_note(records[j], f"{msg}: {records[i]['source_file']}")
+        for k in (i, j):
+            if records[k].get("confidence") != "low":
+                records[k]["confidence"] = "medium"
 
     # 按组选主记录
     groups: Dict[int, List[int]] = {}

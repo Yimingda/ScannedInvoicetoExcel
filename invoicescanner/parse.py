@@ -58,11 +58,31 @@ _ID_ROW_RE = re.compile(
 
 
 def _date_spans(text: str) -> List[Tuple[int, int]]:
+    """会被日期解析消费的文本跨度（其中的数字不算金额）。
+
+    含月份名的模式必须先通过月份校验——否则「54 TOTAL 98」这种
+    「数字+单词+两位数」的形状会被误当日期跨度，把真金额抹掉。
+    """
     spans = []
-    for rx, _kind in _DATE_PATTERNS:
+    for rx, kind in _DATE_PATTERNS:
         for m in rx.finditer(text):
+            g = m.groups()
+            if kind == "Mdy" and not _month_from_token(g[0]):
+                continue
+            if kind in ("dMy", "dMy2") and not _month_from_token(g[1]):
+                continue
             spans.append(m.span())
     return spans
+
+
+# 时刻碎片（12:54 / 20:3..，含分号误读）：其中的数字不是金额。
+# 尾部 (?!\d) 防止吃掉千分位误读（"1;152.00" 不是时刻）。
+_TIME_SPAN_RE = re.compile(
+    r"(?<![\d.])(?:[01]?\d|2[0-3])[:;][0-5]?\d(?:[:;][0-5]\d)?(?!\d)")
+
+
+def _time_spans(text: str) -> List[Tuple[int, int]]:
+    return [m.span() for m in _TIME_SPAN_RE.finditer(text)]
 
 
 _OCR_DIGIT_FIX = [
@@ -91,7 +111,7 @@ def amounts_in_row(text: str) -> List[Tuple[float, str, Optional[str]]]:
     if _ID_ROW_RE.search(text):
         return []
     text = _fix_ocr_digits(text)
-    dspans = _date_spans(text)
+    dspans = _date_spans(text) + _time_spans(text)
     out = []
     for m in _MONEY_RE.finditer(text):
         if not m.group("num"):

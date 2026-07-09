@@ -8,7 +8,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Any
 
+import re as _re
+
 from . import loader, ocr, parse, dedup, segment
+
+# 整行只是「时刻」（11:22 / 20:31:05）——不含可用字段却会被金额解析误读，
+# 解析前丢弃。只匹配严格的 HH:MM(:SS) 形态（小时<24、分钟<60），
+# 「小数点被 OCR 误读成冒号的金额行」(233:00) 由 ocr._fix_text 修复保留。
+_BARE_TIME_RE = _re.compile(
+    r"^\s*([01]?\d|2[0-3])[:;][0-5]\d(?:[:;][0-5]\d)?\s*$")
+
+
+def _drop_bare_time_lines(lines):
+    return [l for l in lines
+            if not _BARE_TIME_RE.match(l.get("text", ""))]
 
 
 def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -32,9 +45,32 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         regions: List[tuple] = []
         if pg.needs_ocr:
             source = "OCR"
+            dpi_scale = int(ocr_cfg.get("pdf_render_dpi", 200)) / 200.0
+            page_lines = None
             if seg_enabled:
-                # 图像级分割：先把每张小票在图上切出来，再分别 OCR
-                dpi_scale = int(ocr_cfg.get("pdf_render_dpi", 200)) / 200.0
+                # 首选：整页 OCR 行 → 票据聚类 → 旋转矩形摆正裁剪 → 重 OCR。
+                # 能处理物理叠压/倾斜的小票（墨迹投影切不开的场景）。
+                page_lines = ocr.recognize(pg.image)
+                groups = segment.cluster_receipts(page_lines or [], dpi_scale)
+                if groups and len(groups) >= 2:
+                    for g in groups:
+                        crop = segment.deskew_crop(pg.image, g, dpi_scale)
+                        up, f = segment.ocr_upscale(crop, g)
+                        lines = ocr.recognize(up)
+                        if f > 1.0:   # 坐标还原到未放大的裁剪图尺度
+                            for l in lines:
+                                l["box"] = [v / f for v in l["box"]]
+                                if l.get("quad"):
+                                    l["quad"] = [[p[0] / f, p[1] / f]
+                                                 for p in l["quad"]]
+                        # 重 OCR 明显变差（裁剪/旋转失败）则退回整页行
+                        if len(lines) < max(3, int(0.5 * len(g))):
+                            lines = g
+                        for sub in segment.refine_wide_region(
+                                lines, crop.shape[1] / dpi_scale):
+                            regions.append((sub, crop))
+            if not regions and seg_enabled:
+                # 回退：图像级分割（单票页/聚类不适用时），再分别 OCR
                 bboxes = segment.segment_image(
                     pg.image,
                     dilate_px=max(8, int(seg_cfg.get("dilate_px", 25) * dpi_scale)),
@@ -49,7 +85,7 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     for sub in segment.refine_wide_region(lines, w / dpi_scale):
                         regions.append((sub, crop))
             if not regions:  # 分割关闭或没切出区域：整页 OCR
-                lines = ocr.recognize(pg.image)
+                lines = page_lines if page_lines is not None else ocr.recognize(pg.image)
                 if lines:
                     regions = [(lines, pg.image)]
         else:
@@ -65,6 +101,9 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         # 图像分割没切净时的兜底：一个区域里若含多张正式票据，按发票头再拆
         split_regions: List[tuple] = []
         for region, crop in regions:
+            region = _drop_bare_time_lines(region)
+            if not region:
+                continue
             subs = (parse.split_stacked_receipts(region, kw)
                     if seg_enabled else [region])
             for s in subs:
@@ -205,17 +244,50 @@ def enrich_review(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _flag_year_outliers(records: List[Dict[str, Any]], log=print) -> None:
-    """同一批票据年份通常一致；年份偏离众数的记录标注请人工核对（防 OCR 误读年份）。"""
+    """同一批票据年份通常一致；年份偏离众数的记录按众数纠正并标注复核。
+
+    热敏纸上 6/0/1 一字之差的年份误读很常见（2026 -> 2020/2021），而
+    日/月部分是独立字符、通常可信——按批次众数纠年，保留原读数于备注，
+    并降为低置信度交人工确认（宁可保守标注，不静默采信错误年份）。
+    """
     years = [r["invoice_date"][:4] for r in records if r.get("invoice_date")]
     if len(years) < 3:
         return
     modal = max(set(years), key=years.count)
     if years.count(modal) < len(years) * 0.6:
         return  # 年份本来就分散，不做判断
+    def _ord(sv):
+        from datetime import date as _pydate
+        try:
+            y, m, dd = map(int, sv.split("-"))
+            return _pydate(y, m, dd).toordinal()
+        except Exception:
+            return None
+
+    # 批次「主体日期」的中位序数（只取众数年的日期），用于区分
+    # 「OCR 误读年份」（纠正后离主体更近）与「合法跨年票」（纠正后反而更远，
+    # 如 12 月底的票在 1 月批次里：2025-12-30 距 1 月初仅几天，改成
+    # 2026-12-30 反而差 11 个月——绝不能改）。
+    modal_ords = [o for r in records
+                  if (d := r.get("invoice_date")) and d[:4] == modal
+                  and (o := _ord(d)) is not None]
+    med = sorted(modal_ords)[len(modal_ords) // 2] if modal_ords else None
+
     for r in records:
         d = r.get("invoice_date")
         if d and d[:4] != modal:
-            note = f"日期年份({d[:4]})与批次众数({modal})不一致，疑似OCR误读，请人工核对"
+            fixed = modal + d[4:]
+            fo, oo = _ord(fixed), _ord(d)
+            can_fix = (med is not None and fo is not None and oo is not None
+                       and abs(fo - med) < abs(oo - med))
+            if can_fix:
+                note = (f"日期年份按批次众数纠正为 {fixed}（票面读作 {d}，"
+                        f"疑似OCR误读年份），请人工核对")
+                r["invoice_date"] = fixed
+                log(f"      [年份纠正] {r.get('source_file')}: {d} -> {fixed}")
+            else:
+                note = (f"日期年份({d[:4]})与批次众数({modal})不一致，"
+                        f"可能为跨年票或OCR误读，请人工核对")
+                log(f"      [年份异常·未纠正] {r.get('source_file')}: {d}")
             r["notes"] = (r.get("notes") or "") + ("; " if r.get("notes") else "") + note
             r["confidence"] = "low"
-            log(f"      [年份异常] {r.get('source_file')}: {d}")

@@ -28,3 +28,6 @@ Thumbs.db
 
 # Claude 工作流的临时 worktree
 .claude/worktrees/
+
+# 回归评测（含真实报销金额，勿提交公开仓库）
+eval_gt.py
