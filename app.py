@@ -50,14 +50,15 @@ I18N = {
         "processing": "识别中 {done}/{total} … {name}",
         "m_total": "识别出记录", "m_review": "需确认", "m_ok": "较确信",
         "review_title": "逐张确认",
-        "review_help": "🟢 较确信=已默认勾选；🟡 待核对；🔴 缺字段（空白已按上下文猜测预填）。核对无误后勾「确认」。",
+        "review_help": "蓝影 [OK]=较确信、已默认勾选；黄影 [??]=待核对；红影 [!!]=缺字段（空白已按上下文猜测预填，虚线蓝字标注来源）。核对无误后勾「确认」。",
         "col_date": "日期", "col_amount": "金额", "col_currency": "币种",
         "col_subtotal": "税前小计", "col_tax": "税额", "col_tip": "小费/服务费",
         "col_kind": "单据种类", "col_type": "类型", "col_notes": "备注",
         "confirm": "确认",
         "guess_candidate": "猜测·另一种日期解释", "guess_page": "猜测·同页多数日期",
         "guess_batch": "猜测·本批多数日期",
-        "st_ok": "🟢 较确信", "st_review": "🟡 待核对", "st_missing": "🔴 缺字段",
+        "st_ok": "较确信", "st_review": "待核对", "st_missing": "缺字段",
+        "brand_tail": "本地 OCR · 离线运行 · 逐张确认",
         "kind_invoice": "发票", "kind_card": "刷卡小票",
         "only_confirmed": "仅导出已确认的行",
         "confirmed_count": "已确认 {c}/{t} 行",
@@ -87,14 +88,15 @@ I18N = {
         "processing": "Recognizing {done}/{total} … {name}",
         "m_total": "Records", "m_review": "Need review", "m_ok": "Confident",
         "review_title": "Confirm each receipt",
-        "review_help": "🟢 confident = pre-checked; 🟡 review; 🔴 missing (blanks pre-filled by best guess). Tick “Confirm” once verified.",
+        "review_help": "Blue shadow [OK] = confident, pre-checked; amber [??] = review; red [!!] = missing (blanks pre-filled by best guess, source noted in blue mono). Tick “Confirm” once verified.",
         "col_date": "Date", "col_amount": "Amount", "col_currency": "Currency",
         "col_subtotal": "Subtotal", "col_tax": "Tax", "col_tip": "Tip/Service",
         "col_kind": "Doc type", "col_type": "Category", "col_notes": "Notes",
         "confirm": "Confirm",
         "guess_candidate": "guess · alternate date reading", "guess_page": "guess · majority date on page",
         "guess_batch": "guess · majority date in batch",
-        "st_ok": "🟢 Confident", "st_review": "🟡 Review", "st_missing": "🔴 Missing",
+        "st_ok": "Confident", "st_review": "Review", "st_missing": "Missing",
+        "brand_tail": "LOCAL OCR · OFFLINE · CONFIRM-EACH",
         "kind_invoice": "Invoice", "kind_card": "Card slip",
         "only_confirmed": "Export confirmed rows only",
         "confirmed_count": "Confirmed {c}/{t} rows",
@@ -107,7 +109,90 @@ I18N = {
     },
 }
 
-st.set_page_config(page_title="Invoice → Excel", page_icon="🧾", layout="wide")
+st.set_page_config(page_title="INVOICE/AUDIT", page_icon="🧾", layout="wide")
+
+# ----------------------------------------------------------------- 「审计终端」主题
+# 瑞士审计纸（纸白/粗黑边/硬阴影/克莱因蓝/大字重数字）× 荧光扫描台（等宽数据/扫描光带/终端标签）
+SWX_CSS = """
+<style>
+:root{ --paper:#F7F7F4; --ink:#141414; --blue:#1436F5; --grey:#767670; --line:#D8D8D2;
+       --amber:#8A6D1F; --red:#C0392B;
+       --mono:ui-monospace,'Cascadia Mono',Consolas,'Courier New',monospace; }
+html, body, [data-testid="stAppViewContainer"]{ background:var(--paper); }
+[data-testid="stHeader"]{ background:rgba(247,247,244,.85); }
+h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
+
+/* 顶栏 */
+.swx-head{ border-bottom:3px solid var(--ink); padding-bottom:10px; margin-bottom:4px;
+           display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px;}
+.swx-head .t{ font-size:27px; font-weight:800; letter-spacing:-.01em; color:var(--ink); }
+.swx-head .t .mono{ font-family:var(--mono); color:var(--blue); font-weight:700; }
+.swx-head .r{ font-family:var(--mono); font-size:11px; letter-spacing:.14em; color:var(--grey); }
+
+/* 指标行 */
+.swx-metrics{ display:flex; gap:26px; margin:14px 0 6px; }
+.swx-m{ flex:1; border-left:3px solid var(--ink); padding:2px 0 4px 14px; }
+.swx-m b{ display:block; font-size:34px; font-weight:800; letter-spacing:-.03em; line-height:1.1;
+          font-variant-numeric:tabular-nums; color:var(--ink); }
+.swx-m.blue b{ color:var(--blue); }
+.swx-m span{ font-family:var(--mono); font-size:10.5px; color:var(--grey);
+             letter-spacing:.14em; text-transform:uppercase; }
+
+/* 确认卡片（st.container key= 会生成 st-key-card_状态_序号 类名） */
+[class*="st-key-card_"]{ background:#fff; border:1.5px solid var(--ink);
+    padding:16px 16px 12px; margin-bottom:16px; }
+[class*="st-key-card_ok"]{ box-shadow:6px 6px 0 var(--blue); }
+[class*="st-key-card_review"]{ box-shadow:6px 6px 0 #E4C465; }
+[class*="st-key-card_missing"]{ box-shadow:6px 6px 0 #E2A493; }
+
+/* 票面扫描框：裁切图上跑克莱因蓝扫描光带 */
+.scanframe{ position:relative; overflow:hidden; border:1.5px solid var(--ink); background:#fff; }
+.scanframe img{ width:100%; display:block; }
+.scanframe::after{ content:""; position:absolute; left:0; right:0; height:34px; top:-40px;
+    background:linear-gradient(180deg,transparent,rgba(20,54,245,.20),transparent);
+    animation:scanbeam 3.2s linear infinite; }
+@keyframes scanbeam{ to{ top:112%; } }
+@media (prefers-reduced-motion: reduce){ .scanframe::after{ animation:none; } }
+
+/* 终端状态标签 */
+.ttag{ font-family:var(--mono); font-size:11px; letter-spacing:.14em; font-weight:700;
+       padding:3px 10px; border:1.5px solid var(--ink); display:inline-block; }
+.ttag.ok{ background:var(--blue); color:#fff; border-color:var(--blue); }
+.ttag.review{ color:var(--amber); border-color:var(--amber); }
+.ttag.missing{ color:var(--red); border-color:var(--red); }
+.swx-src{ font-family:var(--mono); font-size:10.5px; color:var(--grey); letter-spacing:.04em; }
+.swx-guess{ font-family:var(--mono); font-size:11px; color:var(--blue); }
+
+/* 输入控件：方角黑边、等宽数字 */
+div[data-baseweb="input"], div[data-baseweb="base-input"]{
+    border-radius:0 !important; border-color:var(--ink) !important; }
+div[data-baseweb="input"] input{
+    font-family:var(--mono) !important; font-variant-numeric:tabular-nums; font-weight:600; }
+
+/* 按钮：克莱因蓝方块 + 硬阴影 */
+.stButton button, .stDownloadButton button{
+    border-radius:0 !important; border:1.5px solid var(--ink) !important;
+    font-weight:700; letter-spacing:.04em; }
+.stButton button[kind="primary"], .stDownloadButton button{
+    background:var(--blue) !important; color:#fff !important; border-color:var(--blue) !important;
+    box-shadow:4px 4px 0 var(--ink); transition:transform .06s, box-shadow .06s; }
+.stButton button[kind="primary"]:hover, .stDownloadButton button:hover{
+    transform:translate(-1px,-1px); box-shadow:5px 5px 0 var(--ink); }
+.stButton button[kind="primary"]:active, .stDownloadButton button:active{
+    transform:translate(2px,2px); box-shadow:1px 1px 0 var(--ink); }
+
+/* 上传区：黑色虚线方框 */
+[data-testid="stFileUploaderDropzone"]{
+    border:1.5px dashed var(--ink) !important; border-radius:0 !important; background:#fff !important; }
+
+/* 侧栏 */
+[data-testid="stSidebar"]{ background:#fff; border-right:1.5px solid var(--ink); }
+
+/* 提示与折叠面板方角化 */
+[data-testid="stAlert"], [data-testid="stExpander"] details{ border-radius:0 !important; }
+</style>
+"""
+st.markdown(SWX_CSS, unsafe_allow_html=True)
 
 
 def get_lang() -> str:
@@ -167,7 +252,11 @@ with st.sidebar:
 
 
 # ----------------------------------------------------------------- 顶部
-st.title(t("title"))
+st.markdown(
+    f'''<div class="swx-head">
+          <span class="t">INVOICE<span class="mono">/AUDIT_</span></span>
+          <span class="r">{t("brand_tail")}</span>
+        </div>''', unsafe_allow_html=True)
 st.caption(t("caption"))
 
 uploads = st.file_uploader(
@@ -218,26 +307,38 @@ def crop_bytes(path):
     return Path(path).read_bytes() if path and Path(path).exists() else None
 
 
+_TAG_CODE = {"ok": "[OK]", "review": "[??]", "missing": "[!!]"}
+
+
 def render_card(i: int, r: dict, mode: str):
     status = r.get("_status", "review")
     badge = {"ok": t("st_ok"), "review": t("st_review"), "missing": t("st_missing")}[status]
-    with st.container(border=True):
+    with st.container(border=False, key=f"card_{status}_{i}"):
         c_img, c_val = st.columns([2, 3])
         with c_img:
             b = crop_bytes(r.get("_crop_path"))
             if b:
-                st.image(b, width=260)
-            st.caption(r.get("source_file", ""))
+                b64 = base64.b64encode(b).decode()
+                st.markdown(
+                    f'<div class="scanframe"><img src="data:image/jpeg;base64,{b64}"/></div>',
+                    unsafe_allow_html=True)
+            st.markdown(f'<span class="swx-src">{r.get("source_file", "")}</span>',
+                        unsafe_allow_html=True)
         with c_val:
             head = st.columns([3, 2])
-            head[0].markdown(f"**{badge}**  ·  `{r.get('confidence','')}`")
+            head[0].markdown(
+                f'<span class="ttag {status}">{_TAG_CODE[status]} {badge}</span>'
+                f'&nbsp;<span class="swx-src">conf={r.get("confidence", "")}</span>',
+                unsafe_allow_html=True)
             head[1].checkbox(t("confirm"), value=r.get("_confirm_default", False),
                              key=f"cf_{i}")
             f1, f2 = st.columns(2)
             f1.text_input(t("col_date"), value=r.get("_date_default", ""),
                           placeholder="YYYY-MM-DD", key=f"dt_{i}")
             if r.get("_date_guessed"):
-                f1.caption("↑ " + t("guess_" + (r.get("_date_guess_src") or "batch")))
+                f1.markdown(
+                    f'<span class="swx-guess">↖ {t("guess_" + (r.get("_date_guess_src") or "batch"))}</span>',
+                    unsafe_allow_html=True)
             amt = r.get("_amount_default")
             f2.number_input(t("col_amount"), value=(None if amt is None else float(amt)),
                             step=1.0, format="%.2f", key=f"am_{i}")
@@ -263,10 +364,12 @@ if records:
     mode = st.session_state.get("parse_mode", "all")
     n_ok = sum(1 for r in records if r.get("_status") == "ok")
     n_review = len(records) - n_ok
-    m = st.columns(3)
-    m[0].metric(t("m_total"), len(records))
-    m[1].metric(t("m_ok"), n_ok)
-    m[2].metric(t("m_review"), n_review)
+    st.markdown(
+        f'''<div class="swx-metrics">
+              <div class="swx-m"><b>{len(records)}</b><span>{t("m_total")}</span></div>
+              <div class="swx-m blue"><b>{n_ok}</b><span>{t("m_ok")}</span></div>
+              <div class="swx-m"><b>{n_review}</b><span>{t("m_review")}</span></div>
+            </div>''', unsafe_allow_html=True)
 
     st.subheader(t("review_title"))
     st.caption(t("review_help"))

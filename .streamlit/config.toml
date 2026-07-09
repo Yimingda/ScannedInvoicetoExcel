@@ -3,7 +3,11 @@
 maxUploadSize = 50
 
 [theme]
-primaryColor = "#2E7D32"
+# 「审计终端」主题：瑞士审计纸版式 + 荧光扫描台终端感
+primaryColor = "#1436F5"          # 克莱因蓝
+backgroundColor = "#F7F7F4"       # 纸白
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#141414"
 base = "light"
 
 [browser]
