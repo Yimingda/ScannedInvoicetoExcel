@@ -59,6 +59,11 @@ I18N = {
         "guess_batch": "猜测·本批多数日期",
         "st_ok": "较确信", "st_review": "待核对", "st_missing": "缺字段",
         "brand_tail": "本地 OCR · 离线运行 · 逐张确认",
+        "pos": "REC {i} / {n}",
+        "btn_prev": "← 上一张", "btn_skip": "跳过 →", "btn_confirm_next": "✓ 确认，下一张",
+        "done_all": "全部处理完毕", "back_first": "回到第 1 张",
+        "m_confirmed": "已确认", "m_left": "待处理",
+        "confirmed_badge": "[OK] 已确认",
         "kind_invoice": "发票", "kind_card": "刷卡小票",
         "only_confirmed": "仅导出已确认的行",
         "confirmed_count": "已确认 {c}/{t} 行",
@@ -97,6 +102,11 @@ I18N = {
         "guess_batch": "guess · majority date in batch",
         "st_ok": "Confident", "st_review": "Review", "st_missing": "Missing",
         "brand_tail": "LOCAL OCR · OFFLINE · CONFIRM-EACH",
+        "pos": "REC {i} / {n}",
+        "btn_prev": "← Prev", "btn_skip": "Skip →", "btn_confirm_next": "✓ Confirm → next",
+        "done_all": "All done", "back_first": "Back to first",
+        "m_confirmed": "Confirmed", "m_left": "Remaining",
+        "confirmed_badge": "[OK] CONFIRMED",
         "kind_invoice": "Invoice", "kind_card": "Card slip",
         "only_confirmed": "Export confirmed rows only",
         "confirmed_count": "Confirmed {c}/{t} rows",
@@ -162,6 +172,17 @@ h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
 .ttag.missing{ color:var(--red); border-color:var(--red); }
 .swx-src{ font-family:var(--mono); font-size:10.5px; color:var(--grey); letter-spacing:.04em; }
 .swx-guess{ font-family:var(--mono); font-size:11px; color:var(--blue); }
+
+/* 翻页进度条：一格一张票 */
+.swx-pos{ font-family:var(--mono); font-size:12px; letter-spacing:.14em; color:var(--ink);
+          font-weight:700; }
+.swx-strip{ display:flex; flex-wrap:wrap; gap:4px; margin:6px 0 14px; }
+.swx-strip i{ width:18px; height:10px; border:1.5px solid var(--ink); display:block; background:#fff; }
+.swx-strip i.done{ background:var(--blue); border-color:var(--blue); }
+.swx-strip i.cur{ background:var(--ink); }
+.swx-done{ border:1.5px solid var(--blue); background:#fff; box-shadow:6px 6px 0 var(--blue);
+           padding:26px; text-align:center; font-weight:800; font-size:22px; color:var(--blue);
+           letter-spacing:.04em; margin:8px 0 16px; font-family:var(--mono); }
 
 /* 输入控件：方角黑边、等宽数字 */
 div[data-baseweb="input"], div[data-baseweb="base-input"]{
@@ -292,17 +313,19 @@ if run:
                                                  text=t("processing", done=d, total=tot, name=n)))
     pipeline.enrich_review(records)
     bar.empty()
-    # 清掉上一批的确认控件状态（避免行数变化时错位）
+    # 清掉上一批的确认状态（进度存储 + 翻页控件）
     import re as _re
     for k in list(st.session_state.keys()):
-        if _re.match(r"^(dt|am|cf|cur|sub|tax|tip)_\d+$", k):
+        if _re.match(r"^pg_(dt|am)_\d+$", k) or k in ("review", "review_n", "idx", "jump_box"):
             del st.session_state[k]
     st.session_state["records"] = records
     st.session_state["logs"] = logs
     st.session_state["tpl_bytes"] = tpl_file.getvalue() if tpl_file else None
 
 
-# ----------------------------------------------------------------- 逐张确认
+# ----------------------------------------------------------------- 逐张确认（翻页向导）
+# 分页后未渲染的控件状态会被 Streamlit 回收，故用 session_state["review"]
+# 作为进度真值源：{i: {date, amount, confirmed}}；控件只是当前页的编辑面。
 def crop_bytes(path):
     return Path(path).read_bytes() if path and Path(path).exists() else None
 
@@ -310,10 +333,25 @@ def crop_bytes(path):
 _TAG_CODE = {"ok": "[OK]", "review": "[??]", "missing": "[!!]"}
 
 
-def render_card(i: int, r: dict, mode: str):
+def _save_current(i: int):
+    """把当前页控件的编辑值写回进度存储。"""
+    store = st.session_state["review"]
+    if f"pg_dt_{i}" in st.session_state:
+        store[i]["date"] = (st.session_state[f"pg_dt_{i}"] or "").strip()
+    if f"pg_am_{i}" in st.session_state:
+        a = st.session_state[f"pg_am_{i}"]
+        store[i]["amount"] = None if a is None else float(a)
+
+
+def render_wizard_card(i: int, r: dict, mode: str, store: dict):
     status = r.get("_status", "review")
-    badge = {"ok": t("st_ok"), "review": t("st_review"), "missing": t("st_missing")}[status]
-    with st.container(border=False, key=f"card_{status}_{i}"):
+    if store[i]["confirmed"]:
+        tag_html = f'<span class="ttag ok">{t("confirmed_badge")}</span>'
+    else:
+        badge = {"ok": t("st_ok"), "review": t("st_review"),
+                 "missing": t("st_missing")}[status]
+        tag_html = f'<span class="ttag {status}">{_TAG_CODE[status]} {badge}</span>'
+    with st.container(border=False, key=f"wiz_{status}"):
         c_img, c_val = st.columns([2, 3])
         with c_img:
             b = crop_bytes(r.get("_crop_path"))
@@ -325,74 +363,125 @@ def render_card(i: int, r: dict, mode: str):
             st.markdown(f'<span class="swx-src">{r.get("source_file", "")}</span>',
                         unsafe_allow_html=True)
         with c_val:
-            head = st.columns([3, 2])
-            head[0].markdown(
-                f'<span class="ttag {status}">{_TAG_CODE[status]} {badge}</span>'
-                f'&nbsp;<span class="swx-src">conf={r.get("confidence", "")}</span>',
+            st.markdown(
+                tag_html + f'&nbsp;<span class="swx-src">conf={r.get("confidence", "")}</span>',
                 unsafe_allow_html=True)
-            head[1].checkbox(t("confirm"), value=r.get("_confirm_default", False),
-                             key=f"cf_{i}")
             f1, f2 = st.columns(2)
-            f1.text_input(t("col_date"), value=r.get("_date_default", ""),
-                          placeholder="YYYY-MM-DD", key=f"dt_{i}")
+            f1.text_input(t("col_date"), value=store[i]["date"],
+                          placeholder="YYYY-MM-DD", key=f"pg_dt_{i}")
             if r.get("_date_guessed"):
                 f1.markdown(
                     f'<span class="swx-guess">↖ {t("guess_" + (r.get("_date_guess_src") or "batch"))}</span>',
                     unsafe_allow_html=True)
-            amt = r.get("_amount_default")
+            amt = store[i]["amount"]
             f2.number_input(t("col_amount"), value=(None if amt is None else float(amt)),
-                            step=1.0, format="%.2f", key=f"am_{i}")
+                            step=1.0, format="%.2f", key=f"pg_am_{i}")
             if mode == "all":
-                d = st.columns(4)
-                d[0].text_input(t("col_currency"), value=r.get("currency") or "",
-                                key=f"cur_{i}")
-                d[1].text_input(t("col_subtotal"),
-                                value="" if r.get("subtotal") is None else str(r["subtotal"]),
-                                key=f"sub_{i}", disabled=True)
-                d[2].text_input(t("col_tax"),
-                                value="" if r.get("tax") is None else str(r["tax"]),
-                                key=f"tax_{i}", disabled=True)
-                d[3].text_input(t("col_tip"),
-                                value="" if r.get("tip") is None else str(r["tip"]),
-                                key=f"tip_{i}", disabled=True)
-                meta = f"{kind_label(r.get('doc_kind'))} · {r.get('invoice_type','')}"
-                st.caption(meta + (f" · {r['notes']}" if r.get("notes") else ""))
+                meta = " · ".join(x for x in [
+                    kind_label(r.get("doc_kind")), r.get("invoice_type") or "",
+                    r.get("currency") or "",
+                    f'{t("col_subtotal")} {r["subtotal"]}' if r.get("subtotal") is not None else "",
+                    f'{t("col_tax")} {r["tax"]}' if r.get("tax") is not None else "",
+                    f'{t("col_tip")} {r["tip"]}' if r.get("tip") is not None else "",
+                ] if x)
+                st.markdown(f'<span class="swx-src">{meta}</span>', unsafe_allow_html=True)
+                if r.get("notes"):
+                    st.caption(r["notes"])
 
 
 records = st.session_state.get("records")
 if records:
     mode = st.session_state.get("parse_mode", "all")
-    n_ok = sum(1 for r in records if r.get("_status") == "ok")
-    n_review = len(records) - n_ok
+    n = len(records)
+
+    # 初始化进度存储（识别默认值 → 真值源），从第一张未确认的开始
+    if st.session_state.get("review_n") != n or "review" not in st.session_state:
+        st.session_state["review"] = {
+            i: {"date": r.get("_date_default", "") or "",
+                "amount": r.get("_amount_default"),
+                "confirmed": bool(r.get("_confirm_default", False))}
+            for i, r in enumerate(records)}
+        st.session_state["review_n"] = n
+        st.session_state["idx"] = next(
+            (i for i in range(n) if not st.session_state["review"][i]["confirmed"]), n)
+    store = st.session_state["review"]
+    idx = min(max(int(st.session_state.get("idx", 0)), 0), n)   # idx==n 表示全部走完
+
+    n_confirmed = sum(1 for v in store.values() if v["confirmed"])
     st.markdown(
         f'''<div class="swx-metrics">
-              <div class="swx-m"><b>{len(records)}</b><span>{t("m_total")}</span></div>
-              <div class="swx-m blue"><b>{n_ok}</b><span>{t("m_ok")}</span></div>
-              <div class="swx-m"><b>{n_review}</b><span>{t("m_review")}</span></div>
+              <div class="swx-m"><b>{n}</b><span>{t("m_total")}</span></div>
+              <div class="swx-m blue"><b>{n_confirmed}</b><span>{t("m_confirmed")}</span></div>
+              <div class="swx-m"><b>{n - n_confirmed}</b><span>{t("m_left")}</span></div>
             </div>''', unsafe_allow_html=True)
 
-    st.subheader(t("review_title"))
-    st.caption(t("review_help"))
-    for i, r in enumerate(records):
-        render_card(i, r, mode)
+    # 位置行 + 进度条（蓝=已确认，黑=当前，白=待处理）
+    pos_l, pos_r = st.columns([5, 1])
+    pos_l.markdown(
+        f'<div class="swx-pos">{t("pos", i=min(idx + 1, n), n=n)}</div>',
+        unsafe_allow_html=True)
 
-    # 汇总编辑结果
+    def _jump(cur=idx):
+        if cur < n:
+            _save_current(cur)
+        st.session_state["idx"] = int(st.session_state["jump_box"]) - 1
+
+    pos_r.number_input("jump", min_value=1, max_value=n,
+                       value=min(idx + 1, n), key="jump_box",
+                       on_change=_jump, label_visibility="collapsed")
+
+    strip = "".join(
+        f'<i class="{"cur" if i == idx else ("done" if store[i]["confirmed"] else "")}"></i>'
+        for i in range(n))
+    st.markdown(f'<div class="swx-strip">{strip}</div>', unsafe_allow_html=True)
+
+    if idx >= n:
+        # 完成态
+        st.markdown(f'<div class="swx-done">✓ {t("done_all")}_</div>',
+                    unsafe_allow_html=True)
+        if st.button(t("back_first")):
+            st.session_state["idx"] = 0
+            st.rerun()
+    else:
+        st.caption(t("review_help"))
+        render_wizard_card(idx, records[idx], mode, store)
+
+        b_prev, b_skip, b_ok = st.columns([1, 1, 2])
+        if b_prev.button(t("btn_prev"), disabled=idx == 0, width="stretch"):
+            _save_current(idx)
+            st.session_state["idx"] = idx - 1
+            st.rerun()
+        if b_skip.button(t("btn_skip"), width="stretch"):
+            _save_current(idx)
+            st.session_state["idx"] = idx + 1
+            st.rerun()
+        if b_ok.button(t("btn_confirm_next"), type="primary", width="stretch"):
+            _save_current(idx)
+            store[idx]["confirmed"] = True
+            # 跳到下一张未确认的（先向后找，再从头找），没有则进完成态
+            nxt = next((j for j in range(idx + 1, n) if not store[j]["confirmed"]),
+                       next((j for j in range(n) if not store[j]["confirmed"]), n))
+            st.session_state["idx"] = nxt
+            st.rerun()
+
+    # ----------------- 导出（读进度存储，不依赖控件状态） -----------------
     only_conf = st.checkbox(t("only_confirmed"), value=False)
     export, confirmed = [], 0
-    for i in range(len(records)):
-        cf = st.session_state.get(f"cf_{i}", False)
-        d = (st.session_state.get(f"dt_{i}", "") or "").strip()
-        a = st.session_state.get(f"am_{i}")
-        if cf:
+    for i in range(n):
+        v = store[i]
+        d = (v["date"] or "").strip() if i != idx else \
+            (st.session_state.get(f"pg_dt_{i}", v["date"]) or "").strip()
+        a = v["amount"] if i != idx else st.session_state.get(f"pg_am_{i}", v["amount"])
+        if v["confirmed"]:
             confirmed += 1
-        if only_conf and not cf:
+        if only_conf and not v["confirmed"]:
             continue
         if a is None and not d:
             continue
         export.append({"invoice_date": d or None,
                        "total_incl_tax": None if a is None else float(a)})
 
-    st.caption(t("confirmed_count", c=confirmed, t=len(records)))
+    st.caption(t("confirmed_count", c=confirmed, t=n))
     if export:
         try:
             wb = excel_writer.build_workbook(
