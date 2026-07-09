@@ -6,7 +6,8 @@ pymupdf>=1.23
 pdfplumber>=0.11
 openpyxl>=3.1
 pillow>=9.5
-opencv-python-headless>=4.6
+# 注：rapidocr-onnxruntime 硬依赖完整版 opencv-python，会自动装上；
+# 完整 opencv 运行需 libGL.so.1 与 glib，见 packages.txt（libgl1 / libglib2.0-0t64）
 numpy>=1.23
 pyyaml>=6.0
 streamlit>=1.40
