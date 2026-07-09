@@ -53,21 +53,30 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 page_lines = ocr.recognize(pg.image)
                 groups = segment.cluster_receipts(page_lines or [], dpi_scale)
                 if groups and len(groups) >= 2:
+                    deskew_reocr = seg_cfg.get("deskew_reocr", True)
                     for g in groups:
                         crop = segment.deskew_crop(pg.image, g, dpi_scale)
-                        up, f = segment.ocr_upscale(crop, g)
-                        lines = ocr.recognize(up)
-                        if f > 1.0:   # 坐标还原到未放大的裁剪图尺度
-                            for l in lines:
-                                l["box"] = [v / f for v in l["box"]]
-                                if l.get("quad"):
-                                    l["quad"] = [[p[0] / f, p[1] / f]
-                                                 for p in l["quad"]]
-                        # 重 OCR 明显变差（裁剪/旋转失败）则退回整页行
-                        if len(lines) < max(3, int(0.5 * len(g))):
+                        if deskew_reocr:
+                            # 精细模式：摆正+放大后重 OCR（褪色/倾斜票更准，耗时约2x）
+                            up, f = segment.ocr_upscale(crop, g)
+                            lines = ocr.recognize(up)
+                            if f > 1.0:   # 坐标还原到未放大的裁剪图尺度
+                                for l in lines:
+                                    l["box"] = [v / f for v in l["box"]]
+                                    if l.get("quad"):
+                                        l["quad"] = [[p[0] / f, p[1] / f]
+                                                     for p in l["quad"]]
+                            # 重 OCR 明显变差（裁剪/旋转失败）则退回整页行
+                            if len(lines) < max(3, int(0.5 * len(g))):
+                                lines = g
+                            region_w = crop.shape[1] / dpi_scale
+                        else:
+                            # 快速模式：直接用整页 OCR 的行（坐标为页面系）
                             lines = g
-                        for sub in segment.refine_wide_region(
-                                lines, crop.shape[1] / dpi_scale):
+                            xs0 = min(l["box"][0] for l in g)
+                            xs1 = max(l["box"][2] for l in g)
+                            region_w = (xs1 - xs0) / dpi_scale
+                        for sub in segment.refine_wide_region(lines, region_w):
                             regions.append((sub, crop))
             if not regions and seg_enabled:
                 # 回退：图像级分割（单票页/聚类不适用时），再分别 OCR

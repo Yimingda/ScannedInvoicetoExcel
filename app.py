@@ -59,6 +59,18 @@ I18N = {
         "guess_batch": "猜测·本批多数日期",
         "st_ok": "较确信", "st_review": "待核对", "st_missing": "缺字段",
         "brand_tail": "本地 OCR · 离线运行 · 逐张确认",
+        "sub": "票据审计工作台 · 本地 OCR · 数据不出本机",
+        "step1": "上传", "step2": "识别", "step3": "确认", "step4": "导出",
+        "quality": "识别精度",
+        "q_fine": "精细 · 摆正重OCR", "q_fast": "快速 · 约2倍速",
+        "q_help": "精细：每张小票摆正+放大后重新识别，褪色/倾斜票明显更准（实测 16/16，推荐）；快速：跳过重识别，速度约2倍（实测 15/16，多2条冗余行）。",
+        "sec_recognize": "识别", "sec_parse": "解析", "sec_template": "模板",
+        "quick_dates": "候选日期（点击填入）",
+        "hero_title": "三步，把一叠票据变成报销导入表",
+        "hero_1t": "上传", "hero_1d": "图片、扫描 PDF、电子 PDF 均可；一页贴多张小票、叠压、倾斜都能处理。",
+        "hero_2t": "识别", "hero_2d": "本地 OCR 自动分割每张小票，提取日期与带税（含小费）实付金额。首次运行需加载模型。",
+        "hero_3t": "确认", "hero_3d": "逐张对照原图核对，确认即跳下一张；空缺日期已按上下文预填候选。",
+        "foot_l": "INVOICE/AUDIT · LOCAL OCR", "foot_r": "本地离线处理 · 数据不出本机",
         "pos": "REC {i} / {n}",
         "btn_prev": "← 上一张", "btn_skip": "跳过 →", "btn_confirm_next": "✓ 确认，下一张",
         "done_all": "全部处理完毕", "back_first": "回到第 1 张",
@@ -102,6 +114,18 @@ I18N = {
         "guess_batch": "guess · majority date in batch",
         "st_ok": "Confident", "st_review": "Review", "st_missing": "Missing",
         "brand_tail": "LOCAL OCR · OFFLINE · CONFIRM-EACH",
+        "sub": "Receipt audit workbench · local OCR · data stays on this machine",
+        "step1": "Upload", "step2": "Scan", "step3": "Confirm", "step4": "Export",
+        "quality": "Recognition quality",
+        "q_fine": "Fine · deskew re-OCR", "q_fast": "Fast · ~2x speed",
+        "q_help": "Fine: each receipt is deskewed, upscaled and re-recognized — much better on faded/tilted paper (16/16 on benchmark, recommended). Fast: skip re-OCR, ~2x faster (15/16, a couple of noise rows).",
+        "sec_recognize": "Recognition", "sec_parse": "Parsing", "sec_template": "Template",
+        "quick_dates": "Candidate dates (click to fill)",
+        "hero_title": "Three steps from a pile of receipts to a filled sheet",
+        "hero_1t": "Upload", "hero_1d": "Images, scanned or digital PDFs; pages with several overlapping or tilted receipts are fine.",
+        "hero_2t": "Scan", "hero_2d": "Local OCR splits every receipt and extracts the date and the tax-inclusive amount actually paid. First run loads the model.",
+        "hero_3t": "Confirm", "hero_3d": "Verify each receipt against its image; confirming advances automatically. Missing dates come pre-filled with best guesses.",
+        "foot_l": "INVOICE/AUDIT · LOCAL OCR", "foot_r": "processed locally · data never leaves this machine",
         "pos": "REC {i} / {n}",
         "btn_prev": "← Prev", "btn_skip": "Skip →", "btn_confirm_next": "✓ Confirm → next",
         "done_all": "All done", "back_first": "Back to first",
@@ -132,12 +156,54 @@ html, body, [data-testid="stAppViewContainer"]{ background:var(--paper); }
 [data-testid="stHeader"]{ background:rgba(247,247,244,.85); }
 h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
 
-/* 顶栏 */
-.swx-head{ border-bottom:3px solid var(--ink); padding-bottom:10px; margin-bottom:4px;
-           display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px;}
-.swx-head .t{ font-size:27px; font-weight:800; letter-spacing:-.01em; color:var(--ink); }
-.swx-head .t .mono{ font-family:var(--mono); color:var(--blue); font-weight:700; }
-.swx-head .r{ font-family:var(--mono); font-size:11px; letter-spacing:.14em; color:var(--grey); }
+/* 版心：收拢宽屏，留白更从容 */
+[data-testid="stMainBlockContainer"], .block-container{ max-width:1180px; }
+
+/* 品牌栏 + 流程步骤 */
+.swx-mast{ border-bottom:3px solid var(--ink); padding:4px 0 16px; margin-bottom:20px;
+           display:flex; justify-content:space-between; align-items:flex-end;
+           flex-wrap:wrap; gap:14px; }
+.swx-mast .t{ font-size:31px; font-weight:800; letter-spacing:-.015em; line-height:1.05;
+              color:var(--ink); }
+.swx-mast .t .mono{ font-family:var(--mono); color:var(--blue); font-weight:700; }
+.swx-mast .sub{ font-family:var(--mono); font-size:11px; letter-spacing:.16em;
+                color:var(--grey); margin-top:7px; text-transform:uppercase; }
+.swx-steps{ display:flex; align-items:stretch; }
+.swx-step{ font-family:var(--mono); font-size:10.5px; letter-spacing:.12em;
+           padding:7px 15px 6px; border:1.5px solid var(--line); border-left-width:0;
+           color:var(--grey); display:flex; gap:9px; align-items:baseline;
+           background:#fff; text-transform:uppercase; }
+.swx-step:first-child{ border-left-width:1.5px; }
+.swx-step b{ font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; }
+.swx-step.done{ border-color:var(--ink); color:var(--ink); }
+.swx-step.cur{ background:var(--blue); border-color:var(--blue); color:#fff; }
+
+/* 空状态主视觉 */
+.swx-hero{ border:1.5px solid var(--ink); background:#fff; box-shadow:8px 8px 0 var(--line);
+           padding:32px 36px 28px; margin:8px 0 12px; }
+.swx-hero .ht{ font-size:20px; font-weight:800; letter-spacing:-.01em; margin-bottom:20px;
+               color:var(--ink); }
+.swx-hero .cols{ display:flex; gap:32px; flex-wrap:wrap; }
+.swx-hero .c{ flex:1; min-width:190px; border-top:3px solid var(--ink); padding-top:11px; }
+.swx-hero .n{ font-family:var(--mono); font-size:11px; color:var(--blue);
+              letter-spacing:.18em; font-weight:700; }
+.swx-hero .ct{ font-weight:800; font-size:15.5px; margin:3px 0 5px; color:var(--ink); }
+.swx-hero .cd{ font-size:12.5px; color:var(--grey); line-height:1.6; }
+
+/* 候选日期快捷键（按钮 key=chip_* 的紧凑样式） */
+[class*="st-key-chip_"] button{ font-family:var(--mono) !important; font-size:12px !important;
+    min-height:30px !important; padding:2px 10px !important;
+    box-shadow:2px 2px 0 var(--line) !important; }
+
+/* 页脚 */
+.swx-foot{ margin-top:46px; border-top:1.5px solid var(--line); padding-top:11px;
+           font-family:var(--mono); font-size:10.5px; letter-spacing:.14em;
+           color:var(--grey); display:flex; justify-content:space-between;
+           flex-wrap:wrap; gap:6px; text-transform:uppercase; }
+
+/* 侧栏分组标签 */
+.swx-sec{ font-family:var(--mono); font-size:10px; letter-spacing:.2em; color:var(--grey);
+          text-transform:uppercase; margin:12px 0 0; }
 
 /* 指标行 */
 .swx-metrics{ display:flex; gap:26px; margin:14px 0 6px; }
@@ -256,15 +322,21 @@ with st.sidebar:
         st.session_state["lang"] = "zh"
 
     st.title(t("settings"))
+    st.markdown(f'<div class="swx-sec">{t("sec_recognize")}</div>', unsafe_allow_html=True)
+    quality = st.radio(t("quality"), ["fine", "fast"],
+                       format_func=lambda q: t("q_fine") if q == "fine" else t("q_fast"),
+                       key="quality", help=t("q_help"))
+    dpi = st.slider(t("dpi"), 150, 400,
+                    int(cfg.get("ocr", {}).get("pdf_render_dpi", 200)), 50)
+    st.markdown(f'<div class="swx-sec">{t("sec_parse")}</div>', unsafe_allow_html=True)
     mode = st.radio(t("parse_mode"), ["all", "min"],
                     format_func=lambda m: t("mode_all") if m == "all" else t("mode_min"),
                     key="parse_mode")
-    dpi = st.slider(t("dpi"), 150, 400,
-                    int(cfg.get("ocr", {}).get("pdf_render_dpi", 200)), 50)
     date_order = st.radio(t("date_order"), ["dmy", "mdy"],
                           format_func=lambda o: t(o), key="date_order")
     dedup_on = st.checkbox(t("dedup"), value=True)
     st.divider()
+    st.markdown(f'<div class="swx-sec">{t("sec_template")}</div>', unsafe_allow_html=True)
     tpl_file = st.file_uploader(t("upload_tpl"), type=["xlsx"])
     if tpl_file is None and not (ROOT / cfg["template"]["path"]).exists():
         st.warning(t("tpl_missing"))
@@ -272,13 +344,27 @@ with st.sidebar:
         st.caption(t("tpl_hint"))
 
 
-# ----------------------------------------------------------------- 顶部
+# ----------------------------------------------------------------- 顶部（品牌栏 + 流程步骤）
+_recs0 = st.session_state.get("records")
+if not _recs0:
+    _cur_step = 1
+else:
+    _store0 = st.session_state.get("review") or {}
+    _all_done = bool(_store0) and all(v["confirmed"] for v in _store0.values())
+    _cur_step = 4 if (_all_done
+                      or st.session_state.get("idx", 0) >= len(_recs0)) else 3
+_steps_html = "".join(
+    f'<span class="swx-step {"cur" if s == _cur_step else ("done" if s < _cur_step else "")}">'
+    f'<b>0{s}</b>{t("step" + str(s))}</span>'
+    for s in (1, 2, 3, 4))
 st.markdown(
-    f'''<div class="swx-head">
-          <span class="t">INVOICE<span class="mono">/AUDIT_</span></span>
-          <span class="r">{t("brand_tail")}</span>
+    f'''<div class="swx-mast">
+          <div>
+            <div class="t">INVOICE<span class="mono">/AUDIT_</span></div>
+            <div class="sub">{t("sub")}</div>
+          </div>
+          <div class="swx-steps">{_steps_html}</div>
         </div>''', unsafe_allow_html=True)
-st.caption(t("caption"))
 
 uploads = st.file_uploader(
     t("uploader"),
@@ -296,6 +382,8 @@ if run:
     run_cfg["ocr"] = dict(run_cfg.get("ocr", {}), pdf_render_dpi=dpi)
     run_cfg["parsing"] = dict(run_cfg.get("parsing", {}), date_order=date_order)
     run_cfg["dedup"] = dict(run_cfg.get("dedup", {}), enabled=dedup_on)
+    run_cfg["segment"] = dict(run_cfg.get("segment", {}) or {},
+                              deskew_reocr=(quality == "fine"))
 
     workdir = Path(tempfile.mkdtemp(prefix="invsc_"))
     run_cfg["_crop_dir"] = str(workdir / "crops")
@@ -343,6 +431,39 @@ def _save_current(i: int):
         store[i]["amount"] = None if a is None else float(a)
 
 
+def _fill_date(i: int, val: str):
+    """候选日期一键填入：写进度存储并清掉控件旧值，让输入框重新取值。"""
+    st.session_state["review"][i]["date"] = val
+    st.session_state.pop(f"pg_dt_{i}", None)
+
+
+def _date_suggestions(i: int) -> list:
+    """当前票的候选日期：本票的其他日期解释 > 同页多数日期 > 本批多数日期。
+
+    专为票面日期被涂抹/褪色的场景准备——点一下即可填入，免手敲。
+    """
+    recs = st.session_state.get("records") or []
+    r = recs[i]
+    out: list = []
+
+    def add(d):
+        if d and d not in out:
+            out.append(d)
+
+    for c in (r.get("date_candidates") or []):
+        add(c)
+    pg = pipeline._page_of(r)
+    if pg is not None:
+        same = [x["invoice_date"] for x in recs
+                if x is not r and x.get("invoice_date") and pipeline._page_of(x) == pg]
+        for d in sorted(set(same), key=same.count, reverse=True):
+            add(d)
+    alldates = [x["invoice_date"] for x in recs if x.get("invoice_date")]
+    if alldates:
+        add(max(set(alldates), key=alldates.count))
+    return out[:3]
+
+
 def render_wizard_card(i: int, r: dict, mode: str, store: dict):
     status = r.get("_status", "review")
     if store[i]["confirmed"]:
@@ -373,6 +494,18 @@ def render_wizard_card(i: int, r: dict, mode: str, store: dict):
                 f1.markdown(
                     f'<span class="swx-guess">↖ {t("guess_" + (r.get("_date_guess_src") or "batch"))}</span>',
                     unsafe_allow_html=True)
+            # 候选日期快捷键：日期缺失/靠猜测时给一键填入（涂抹/褪色票专用）
+            cur_val = (st.session_state.get(f"pg_dt_{i}", store[i]["date"]) or "").strip()
+            if not store[i]["confirmed"] and (r.get("_date_guessed") or not cur_val):
+                sugg = [d for d in _date_suggestions(i) if d != cur_val]
+                if sugg:
+                    st.markdown(f'<span class="swx-src">{t("quick_dates")}</span>',
+                                unsafe_allow_html=True)
+                    ccols = st.columns(max(len(sugg), 1))
+                    for k, dv in enumerate(sugg):
+                        ccols[k].button(dv, key=f"chip_{i}_{k}",
+                                        on_click=_fill_date, args=(i, dv),
+                                        width="stretch")
             amt = store[i]["amount"]
             f2.number_input(t("col_amount"), value=(None if amt is None else float(amt)),
                             step=1.0, format="%.2f", key=f"pg_am_{i}")
@@ -502,4 +635,20 @@ if records:
         st.code("\n".join(st.session_state.get("logs", [])), language="text")
     st.caption(t("reparse_hint"))
 else:
-    st.info(t("empty_hint"))
+    st.markdown(
+        f'''<div class="swx-hero">
+              <div class="ht">{t("hero_title")}</div>
+              <div class="cols">
+                <div class="c"><span class="n">01</span>
+                  <div class="ct">{t("hero_1t")}</div><div class="cd">{t("hero_1d")}</div></div>
+                <div class="c"><span class="n">02</span>
+                  <div class="ct">{t("hero_2t")}</div><div class="cd">{t("hero_2d")}</div></div>
+                <div class="c"><span class="n">03</span>
+                  <div class="ct">{t("hero_3t")}</div><div class="cd">{t("hero_3d")}</div></div>
+              </div>
+            </div>''', unsafe_allow_html=True)
+
+st.markdown(
+    f'''<div class="swx-foot">
+          <span>{t("foot_l")}</span><span>{t("foot_r")}</span>
+        </div>''', unsafe_allow_html=True)
