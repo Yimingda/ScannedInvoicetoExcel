@@ -1,0 +1,5 @@
+# 统一用 LF，避免跨平台换行差异
+* text=auto eol=lf
+*.png binary
+*.xlsx binary
+*.pdf binary

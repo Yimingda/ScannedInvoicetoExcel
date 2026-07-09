@@ -1,0 +1,64 @@
+# ============================================================
+# InvoiceScanner 配置文件
+# ============================================================
+
+# 输入 / 输出目录
+input_dir: input          # 把待识别的发票(jpg/png/pdf)放这里
+output_dir: output        # 结果 Excel 输出到这里
+
+# ---------------- OCR 设置 ----------------
+ocr:
+  # 电子 PDF(带文字层)优先直接提取文字，跳过 OCR，速度快且更准
+  prefer_pdf_text_layer: true
+  # 扫描件/图片渲染 DPI，越高越清晰但越慢
+  pdf_render_dpi: 200
+  # 语言由 RapidOCR 内置 PP-OCR 中英文模型自动处理，无需配置
+
+# ---------------- 解析 ----------------
+parsing:
+  # 歧义数字日期(07/03/2026)的读法：dmy=日/月/年(南非/欧洲等)，mdy=月/日/年(美式)
+  # 两种合法解释都会保留，去重时与刷卡小票交叉验证自动纠偏
+  date_order: dmy
+
+# ---------------- 版面分割 ----------------
+# 一页贴多张小票时，先在图像上按墨迹连块切出每张小票再分别 OCR
+segment:
+  enabled: true
+  dilate_px: 25      # 墨迹膨胀核（200dpi 基准）：约 1.5 倍行距，票内文字连成一块
+  merge_gap_px: 70   # 同列碎块纵向合并阈值：小于它视为同一张小票的段落空隙
+
+# ---------------- 去重 ----------------
+# 识别指向同一笔交易的多张单据（如 发票 + 刷卡小票），避免重复计入
+dedup:
+  enabled: true
+  # skip = 重复票不单独占行，文件名并入主记录备注（金额列可直接求和）
+  # mark = 重复票照常写入但备注标记「重复」，自行筛选
+  mode: skip
+  # 同单判定的日期容差（天）：开票日期常比刷卡晚几天
+  date_tolerance_days: 3
+
+# ---------------- Excel 模板映射 ----------------
+# 把你的模板放到 template.path 指向的位置。
+# 若该文件不存在，程序会自动生成一个带表头的默认模板到该路径。
+# columns 里写「字段 -> 列字母」，一个字段可以填多列（如开始/结束日期同一天）。
+template:
+  # 空白模板（保留表头与填写说明，无示例数据）。换新一批发票时无需改动。
+  path: templates/报销单导入模板_空白.xlsx
+  sheet: 费用信息        # 要写入的工作表名；留空则用第一个工作表
+  header_row: 3          # 表头所在行
+  start_row: 5           # 第一条数据写入的行（第4行是填写说明）
+  columns:
+    invoice_date: [B, C] # 费用开始时间 / 费用结束时间（同一天）
+    total_incl_tax: K    # 票据金额（含税含小费的实付金额）
+
+# ---------------- 解析关键词（可按需扩充）----------------
+keywords:
+  subtotal: ["subtotal", "sub total", "sub-total", "net amount", "net total", "bill excl", "小计", "不含税", "金额合计"]
+  tax:      ["sales tax", "tax", "vat", "gst", "hst", "税额", "增值税", "税金"]
+  tip:      ["gratuity", "service charge", "service chg", "tip", "小费", "服务费"]
+  # 实付/刷卡行：金额常 = 票面总额 + 小费，报销按此取值（含 cash 的行自动排除）
+  tendered: ["tendered", "c/card", "card", "purchase", "实付", "刷卡"]
+  total:    ["grand total", "balance due", "amount due", "total due", "bill total", "total", "价税合计", "应付", "总计", "合计", "交易金额", "paid", "金额", "amount"]
+  # 含这些词的行整行忽略（小费建议表等，会伪装成 total/tip 行；含 OCR 变体）
+  ignore:   ["new total", "nev total", "nen total", "suggested", "suggestion", "gratuity suggestions"]
+  date_hint: ["date", "invoice date", "开票日期", "日期", "时间", "time"]

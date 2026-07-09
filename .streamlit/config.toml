@@ -1,0 +1,10 @@
+[server]
+# 允许上传较大的扫描 PDF
+maxUploadSize = 50
+
+[theme]
+primaryColor = "#2E7D32"
+base = "light"
+
+[browser]
+gatherUsageStats = false

@@ -1,0 +1,27 @@
+# ---- Python ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 运行产物 ----
+output/
+*.log
+
+# ---- 隐私数据（切勿提交到公开仓库）----
+# 真实发票扫描件
+*.pdf
+input/*
+!input/.gitkeep
+# 公司报销模板（含内部费用类型/成本中心）与带真实金额的答案表
+templates/*.xlsx
+报销单导入模板*.xlsx
+templates/*
+!templates/.gitkeep
+
+# ---- 编辑器/系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
