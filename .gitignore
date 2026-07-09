@@ -25,3 +25,6 @@ templates/*
 Thumbs.db
 .idea/
 .vscode/
+
+# Claude 工作流的临时 worktree
+.claude/worktrees/
