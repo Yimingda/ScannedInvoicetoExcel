@@ -151,6 +151,59 @@ def process_all(cfg: Dict[str, Any], log=print) -> List[Dict[str, Any]]:
     return process_files(files, cfg, log=log)
 
 
+def _page_of(rec: Dict[str, Any]):
+    import re
+    m = re.search(r"第(\d+)页", rec.get("source_file", ""))
+    return int(m.group(1)) if m else None
+
+
+def enrich_review(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """为逐张确认界面补充：字段默认值、猜测来源、确认状态。
+
+    - _amount_default / _date_default：预填给确认卡片的默认值
+    - 空日期猜测优先级：本记录候选解释 > 同页其他票的多数日期 > 全批次多数日期
+    - _date_guessed / _date_guess_src：是否为猜测及其来源（供界面标注）
+    - _status：ok（较确信，默认勾选）/ review（待核对）/ missing（缺字段或猜测）
+    - _confirm_default：是否默认勾选「确认」
+    """
+    dates = [r["invoice_date"] for r in records if r.get("invoice_date")]
+    batch_modal = max(set(dates), key=dates.count) if dates else None
+
+    for r in records:
+        r["_amount_default"] = r.get("total_incl_tax")
+
+        if r.get("invoice_date"):
+            r["_date_default"] = r["invoice_date"]
+            r["_date_guessed"] = False
+            r["_date_guess_src"] = None
+        else:
+            guess, src = None, None
+            cands = r.get("date_candidates") or []
+            if cands:
+                guess, src = cands[0], "candidate"
+            if not guess:
+                pg = _page_of(r)
+                same = [x["invoice_date"] for x in records
+                        if x.get("invoice_date") and _page_of(x) == pg and pg is not None]
+                if same:
+                    guess, src = max(set(same), key=same.count), "page"
+            if not guess and batch_modal:
+                guess, src = batch_modal, "batch"
+            r["_date_default"] = guess or ""
+            r["_date_guessed"] = guess is not None
+            r["_date_guess_src"] = src
+
+        conf = r.get("confidence")
+        complete = bool(r.get("invoice_date")) and r.get("total_incl_tax") is not None
+        if conf == "high" and complete:
+            r["_status"], r["_confirm_default"] = "ok", True
+        elif complete and conf == "medium":
+            r["_status"], r["_confirm_default"] = "review", False
+        else:
+            r["_status"], r["_confirm_default"] = "missing", False
+    return records
+
+
 def _flag_year_outliers(records: List[Dict[str, Any]], log=print) -> None:
     """同一批票据年份通常一致；年份偏离众数的记录标注请人工核对（防 OCR 误读年份）。"""
     years = [r["invoice_date"][:4] for r in records if r.get("invoice_date")]
