@@ -36,7 +36,8 @@ InvoiceScanner/
 ├─ finalize.py            # 命令行批处理（出「导入表」+「复核表」）
 ├─ main.py                # 命令行（只出导入表）
 ├─ config.yaml            # 配置：OCR/模板列映射/关键词/去重
-├─ requirements.txt        # Python 依赖（用 opencv-python-headless，无需系统库）
+├─ requirements.txt        # Python 依赖
+├─ packages.txt           # 仅 libgl1（rapidocr 依赖完整 opencv，需 libGL.so.1）
 ├─ .streamlit/config.toml # 网页上传大小/主题
 ├─ invoicescanner/        # 引擎包（loader/ocr/parse/segment/dedup/excel_writer/pipeline）
 ├─ input/ output/ templates/ samples/
@@ -56,8 +57,8 @@ InvoiceScanner/
 
 1. 把本项目推到 GitHub。
 2. 在 https://share.streamlit.io 新建 App，主文件选 `app.py`。
-3. 依赖自动读 `requirements.txt`（用 `opencv-python-headless`，**不需要 packages.txt 系统库**）。
-   首次启动会下载 OCR 模型，稍慢。
+3. 依赖自动读 `requirements.txt` 与 `packages.txt`（仅 `libgl1`；**切勿加 `libglib2.0-0`**，
+   它在当前 Debian trixie 镜像上会让 apt 失败）。首次启动会下载 OCR 模型，稍慢。
 
 > 注意：Community Cloud 免费额度内存约 1GB，OCR 大批量/高 DPI 可能吃紧；
 > 自有服务器（`streamlit run app.py --server.port 80`）或内网部署更稳。
