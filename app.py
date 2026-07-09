@@ -17,6 +17,16 @@ import yaml
 
 from invoicescanner import pipeline, excel_writer
 
+# ---- Streamlit Cloud 热更新兜底 ----
+# Cloud「Pulling code changes」后有时不重启 Python 进程：app.py 是新的，
+# 但 invoicescanner 包还是 sys.modules 里缓存的旧模块（缺新函数 → AttributeError）。
+# 检测到关键函数缺失时，清掉整个包的模块缓存重新导入，实现自愈。
+if not hasattr(pipeline, "enrich_review") or not hasattr(excel_writer, "build_workbook"):
+    import sys as _sys
+    for _n in [n for n in list(_sys.modules) if n.startswith("invoicescanner")]:
+        _sys.modules.pop(_n, None)
+    from invoicescanner import pipeline, excel_writer  # noqa: F811
+
 ROOT = Path(__file__).parent
 
 # ----------------------------------------------------------------- 文案（中/英）
