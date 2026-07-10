@@ -16,18 +16,41 @@ from pathlib import Path
 import streamlit as st
 import yaml
 
-from invoicescanner import pipeline, excel_writer
+try:
+    from invoicescanner import pipeline, excel_writer
+except KeyError:
+    # 另一会话恰在热重载（旧版自愈会弹出模块键）——稍候重试一次即可
+    time.sleep(0.5)
+    from invoicescanner import pipeline, excel_writer  # noqa: F811
 
-# ---- Streamlit Cloud 热更新兜底 ----
+# ---- Streamlit Cloud 热更新兜底（线程安全版） ----
 # Cloud「Pulling code changes」后有时不重启 Python 进程：app.py 是新的，
-# 但 invoicescanner 包还是 sys.modules 里缓存的旧模块（缺新函数 → AttributeError）。
-# 检测到关键函数缺失时，清掉整个包的模块缓存重新导入，实现自愈。
-if not all(hasattr(pipeline, f) for f in
-           ("enrich_review", "resplit_crop", "_page_of", "process_files")) \
-        or not hasattr(excel_writer, "build_workbook"):
+# 但 invoicescanner 包还是缓存的旧模块（缺新函数 → AttributeError）。
+# 必须用 importlib.reload 原地重载：sys.modules 的键全程存在，
+# 其他会话并发 import 不会 KeyError（弹出式重导在多会话下会炸）。
+_REQUIRED = ("enrich_review", "resplit_crop", "_page_of", "process_files")
+
+
+def _modules_stale() -> bool:
+    return (not all(hasattr(pipeline, f) for f in _REQUIRED)
+            or not hasattr(excel_writer, "build_workbook"))
+
+
+if _modules_stale():
+    import importlib as _il
     import sys as _sys
-    for _n in [n for n in list(_sys.modules) if n.startswith("invoicescanner")]:
-        _sys.modules.pop(_n, None)
+    import threading as _th
+    import invoicescanner as _pkg
+    _lock = _pkg.__dict__.setdefault("_heal_lock", _th.Lock())
+    with _lock:
+        if _modules_stale():   # 双检：别的会话可能已完成重载
+            # 按依赖顺序原地重载（先叶子后 pipeline）
+            for _n in ("loader", "ocr", "parse", "segment", "dedup",
+                       "excel_writer", "pipeline"):
+                _m = _sys.modules.get(f"invoicescanner.{_n}")
+                if _m is not None:
+                    _il.reload(_m)
+            _il.reload(_pkg)
     from invoicescanner import pipeline, excel_writer  # noqa: F811
 
 ROOT = Path(__file__).parent
