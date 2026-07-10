@@ -52,7 +52,8 @@ def parse_money(text: str) -> List[Tuple[float, str, Optional[str]]]:
 _ID_ROW_RE = re.compile(
     r"商户号|终端号|卡号|授权码|凭证号|批次号|流水号|订单号|参考号|发票号|校验码|电话|"
     r"terminal|merchant\s*(id|no)|auth|approval|batch|ref(erence)?\s*(no|#)|"
-    r"card\s*(no|#)|account|tel|phone",
+    r"card\s*(no|#)|account|tel|phone|"
+    r"inv(oice)?\s*no|tax\s*inv\s*no",   # Tax Inv No: 1362 —— 发票号不是税额
     re.IGNORECASE,
 )
 
@@ -373,19 +374,26 @@ _GRATUITY_SUGGEST_RE = re.compile(
 
 
 def classify_rows(rows: List[Dict[str, Any]], kw: Dict[str, List[str]]):
-    """返回 subtotal/tax/tip 单值、total 候选列表、tendered(实付/刷卡)候选列表。"""
+    """返回 subtotal/tax/tip 单值、total 候选列表、tendered 候选列表、
+    tip 关键词行位置列表（Gratuity:/Tip: 常留空无金额，但其「位置」是
+    识别手写含小费终额的关键版式信号）。"""
     subtotal = tax = tip = None
     total_candidates: List[Dict[str, Any]] = []
     tendered: List[Dict[str, Any]] = []
+    tip_positions: List[int] = []
     tendered_kws = kw.get("tendered", [])
     ignore_kws = kw.get("ignore", [])
-    for r in rows:
+    for idx, r in enumerate(rows):
         low = r["text"].lower()
         # 忽略行：小费建议表（Gratuity Suggestions / @X% = ... New Total ...）等干扰
         if ignore_kws and _has_kw(low, ignore_kws):
             continue
         if _GRATUITY_SUGGEST_RE.search(r["text"]):
             continue
+        # tip 关键词行的位置先记下——Gratuity:/Tip: 常留空（无金额），
+        # 但它出现在哪一行，是判断「其后的 TOTAL 是手写含小费终额」的版式依据
+        if _has_kw(low, kw["tip"]):
+            tip_positions.append(idx)
         amt = _last_amount(r["text"])
         if amt is None:
             continue
@@ -413,9 +421,9 @@ def classify_rows(rows: List[Dict[str, Any]], kw: Dict[str, List[str]]):
                     continue
                 rank = kw["total"].index(hit)   # 越小优先级越高
                 total_candidates.append({"value": best[0], "rank": rank,
-                                         "decimal": best[1],
+                                         "decimal": best[1], "pos": idx,
                                          "kw": hit, "text": r["text"]})
-    return subtotal, tax, tip, total_candidates, tendered
+    return subtotal, tax, tip, total_candidates, tendered, tip_positions
 
 
 TIP_RATIO_MAX = 1.35   # 刷卡金额最多超票面总额 35%（覆盖常见 10~30% 小费）
@@ -433,7 +441,7 @@ def _apply_tendered(total, conf, notes, tendered):
 
 
 def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
-               tendered=None):
+               tendered=None, tip_positions=None):
     """核心：从候选中挑出「带税总金额」，返回 (值, 置信度, 备注)。"""
     tendered = tendered or []
     # 仅在有税前小计时做求和校验（增值税「已含税」场景下 税+小费 无意义）
@@ -462,7 +470,7 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
             pool = decimal_pool or [a for a, _f, _c, _n in all_amounts]
             pool = [a for a in pool if subtotal is None or a >= subtotal - 0.01] or pool
             if not pool:
-                return None, "low", "未找到任何金额"
+                return None, "low", "未找到任何金额", None
             val, conf = max(pool), "low"
             notes.append("无 total 标签，兜底取最大合理金额")
 
@@ -486,6 +494,23 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
             else:
                 notes.append(f"期望 小计+税+小费={expected}，无候选精确匹配")
 
+    # 1b) 服务费/小费验算：某候选 ≈ 另一候选 + 小费（Total 931 + Service
+    #     Charge 116.38 = To Pay 1047.38）——算式精确成立即为终额，高置信。
+    if val is None and tip is not None and tip > 0 and len(candidates) >= 2:
+        for a in candidates:
+            for b in candidates:
+                if b is a:
+                    continue
+                tol2 = max(0.02, b["value"] * 0.001)
+                if abs(a["value"] + tip - b["value"]) <= tol2:
+                    val, conf = b["value"], "high"
+                    notes.append(
+                        f"验算通过：{a['value']} + 服务费/小费 {tip} = {b['value']}，"
+                        f"按含服务费终额取值")
+                    break
+            if val is not None:
+                break
+
     # 2) 按关键词优先级选；同级先看是否带小数点（更像真金额），再取较大值
     if val is None:
         best = sorted(candidates,
@@ -505,9 +530,31 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
             notes.append(f"候选: {others}")
         notes.append(f"按关键词『{best['kw']}』选定")
 
-    # 3) 实付/刷卡金额覆盖：报销口径 = 实际支付（含小费）
+    # 3) 手写含小费终额：西式小票常见「印刷 Total(税后) → Gratuity:(留空)
+    #    → TOTAL:(客人手写含小费)」版式——小费关键词行之后仍出现 total 候选时，
+    #    位置最靠后的那个才是最终应付额。手写数字 OCR 误读率高，故：
+    #    a) 只在 [0.6, 1.6]×当前值 区间内采信（防误读出离谱数字）；
+    #    b) 置信度压到 medium 强制人工过目。
+    printed_total = None   # 手写终额覆盖时保留印刷总额——刷卡回执常与它互验
+    if (invoice_type != "vat" and val is not None
+            and tip_positions and candidates):
+        first_tip = min(tip_positions)
+        after_tip = [c for c in candidates
+                     if c.get("pos", -1) > first_tip
+                     and 0.6 * val <= c["value"] <= 1.6 * val]
+        if after_tip:
+            final = max(after_tip, key=lambda c: c.get("pos", -1))
+            if final["value"] != val:
+                notes.append(f"小费行后另有总额 {final['value']}"
+                             f"（多为手写含小费终额），按其取值；印刷总额 {val}")
+                printed_total = val
+                val = final["value"]
+                if conf == "high":
+                    conf = "medium"
+
+    # 4) 实付/刷卡金额覆盖：报销口径 = 实际支付（含小费），优先级最高
     val, conf, notes = _apply_tendered(val, conf, notes, tendered)
-    return val, conf, "; ".join(notes)
+    return val, conf, "; ".join(notes), printed_total
 
 
 # ---------------------------------------------------------------- 单据种类（发票 vs 刷卡小票）
@@ -616,9 +663,10 @@ def parse_invoice(lines: List[Dict[str, Any]], kw: Dict[str, List[str]],
             if c not in date_candidates:
                 date_candidates.append(c)
 
-    subtotal, tax, tip, candidates, tendered = classify_rows(rows, kw)
-    total, conf, notes = pick_total(subtotal, tax, tip, candidates,
-                                    all_amounts, invoice_type, tendered)
+    subtotal, tax, tip, candidates, tendered, tip_positions = classify_rows(rows, kw)
+    total, conf, notes, printed_total = pick_total(
+        subtotal, tax, tip, candidates, all_amounts, invoice_type,
+        tendered, tip_positions)
 
     return {
         "invoice_type": invoice_type,
@@ -630,6 +678,7 @@ def parse_invoice(lines: List[Dict[str, Any]], kw: Dict[str, List[str]],
         "tax": tax,
         "tip": tip,
         "total_incl_tax": total,
+        "printed_total": printed_total,
         "confidence": conf,
         "notes": notes,
     }

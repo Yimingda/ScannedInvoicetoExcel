@@ -133,25 +133,67 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _save_crop(crop, crop_dir, name: str):
-    """存下区域裁切图（缩到合适宽度）供复核表内嵌预览。返回路径或 None。"""
+    """存下区域裁切图（保留原分辨率——「拆分重识别」要在它上面重跑 OCR，
+    缩图会毁掉识别质量；界面/复核表展示时自行缩放）。返回路径或 None。"""
     try:
         import cv2
         Path(crop_dir).mkdir(parents=True, exist_ok=True)
-        h, w = crop.shape[:2]
-        max_w = 360
-        if w > max_w:
-            crop = cv2.resize(crop, (max_w, int(h * max_w / w)),
-                              interpolation=cv2.INTER_AREA)
         out = Path(crop_dir) / f"{name}.jpg"
         # cv2.imwrite 在含中文的 Windows 路径下会静默失败——改用 imencode + 二进制写
         ok, buf = cv2.imencode(".jpg", cv2.cvtColor(crop, cv2.COLOR_RGB2BGR),
-                               [cv2.IMWRITE_JPEG_QUALITY, 70])
+                               [cv2.IMWRITE_JPEG_QUALITY, 78])
         if not ok:
             return None
         out.write_bytes(buf.tobytes())
         return str(out)
     except Exception:
         return None
+
+
+def resplit_crop(crop_path: str, parts: int, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """人工纠错：自动分割把 2~3 张票并成了一张时，把该区域裁切图
+    强制均分为 N 段（带 2% 重叠防切断行）并逐段重新识别。
+
+    竖长图按上下切（叠贴小票的常态），横宽图按左右切。
+    返回 N 条新记录（含各段的裁切图路径）。
+    """
+    import cv2
+    import numpy as np
+
+    data = np.frombuffer(Path(crop_path).read_bytes(), dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError(f"无法读取裁切图: {crop_path}")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w = img.shape[:2]
+    kw = cfg["keywords"]
+    date_order = (cfg.get("parsing", {}) or {}).get("date_order", "dmy")
+    vertical_stack = h >= w   # 竖长 → 上下切
+    out: List[Dict[str, Any]] = []
+    base = Path(crop_path)
+    for k in range(parts):
+        if vertical_stack:
+            y0 = max(0, int(h * k / parts) - int(0.02 * h))
+            y1 = min(h, int(h * (k + 1) / parts) + int(0.02 * h))
+            band = img[y0:y1]
+        else:
+            x0 = max(0, int(w * k / parts) - int(0.02 * w))
+            x1 = min(w, int(w * (k + 1) / parts) + int(0.02 * w))
+            band = img[:, x0:x1]
+        band = np.ascontiguousarray(band)
+        lines = ocr.recognize(band)
+        rec = parse.parse_invoice(lines or [], kw, kw.get("date_hint", []),
+                                  date_order)
+        rec["source_file"] = f"{base.stem} 手动拆分{k + 1}/{parts}"
+        rec["_source"] = "OCR"
+        p = base.parent / f"{base.stem}_split{parts}_{k + 1}.jpg"
+        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(band, cv2.COLOR_RGB2BGR),
+                               [cv2.IMWRITE_JPEG_QUALITY, 78])
+        if ok:
+            p.write_bytes(buf.tobytes())
+            rec["_crop_path"] = str(p)
+        out.append(rec)
+    return out
 
 
 def process_files(files: List[Path], cfg: Dict[str, Any], log=print,

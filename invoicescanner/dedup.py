@@ -81,11 +81,19 @@ def _same_transaction(a: Dict[str, Any], b: Dict[str, Any],
     ka, kb = a.get("doc_kind"), b.get("doc_kind")
     cross = {ka, kb} == {"invoice", "card_slip"}
     if not exact:
-        # 小费容差：发票+刷卡小票 组合，刷卡金额 = 票面 + 小费
         if not cross:
             return None
-        inv_t, slip_t = (ta, tb) if ka == "invoice" else (tb, ta)
-        if not (inv_t < slip_t <= inv_t * TIP_RATIO_MAX):
+        inv, slip = (a, b) if ka == "invoice" else (b, a)
+        inv_t, slip_t = inv["total_incl_tax"], slip["total_incl_tax"]
+        # 两种「金额不等但确为同单」的版式：
+        #  1) 小费刷进卡里：刷卡金额 = 票面 + 小费（slip > inv，比例受限）
+        #  2) 小费付了现金：发票终额=手写(印刷+小费)，刷卡只付印刷部分
+        #     → 回执金额 ≈ 发票的印刷总额（强互验信号，精确到分）
+        tip_on_card = inv_t < slip_t <= inv_t * TIP_RATIO_MAX
+        pt = inv.get("printed_total")
+        tip_in_cash = (pt is not None and abs(slip_t - pt) <= 0.011
+                       and slip_t < inv_t <= slip_t * TIP_RATIO_MAX)
+        if not (tip_on_card or tip_in_cash):
             return None
         # 金额不等的合并要求日期必须双方都有且匹配（更严格，防误合并）
         if _dates_match(a, b, date_tol_days):
@@ -172,20 +180,41 @@ def deduplicate(records: List[Dict[str, Any]], cfg: Dict[str, Any],
     out: List[Dict[str, Any]] = []
     for _, idxs in sorted(groups.items(), key=lambda kv: min(kv[1])):
         if len(idxs) == 1:
-            out.append(records[idxs[0]])
+            solo = records[idxs[0]]
+            # 未匹配到发票的刷卡回执：明确标注——它可能本身就是唯一凭证
+            # （超市/加油站常只有回执），也可能对应的发票识别失败，请留意
+            if (solo.get("doc_kind") == "card_slip"
+                    and "疑似" not in (solo.get("notes") or "")):
+                _append_note(solo, "独立刷卡回执：本批未找到金额相符的发票，"
+                                   "可能本身即消费凭证")
+            out.append(solo)
             continue
         idxs_sorted = sorted(idxs, key=lambda i: _priority(records[i]))
         primary, dups = records[idxs_sorted[0]], [records[i] for i in idxs_sorted[1:]]
         merged = ", ".join(f"{d['source_file']}({_kind_label(d)})" for d in dups)
         _append_note(primary, f"同单合并: {merged}")
-        # 金额：取组内最大（刷卡金额含小费 >= 票面总额，报销按实付）
-        group_totals = [r.get("total_incl_tax") for r in [primary] + dups
+        # 金额：取组内最大（含小费终额 >= 印刷/刷卡部分，报销按最终应付）
+        group = [primary] + dups
+        group_totals = [r.get("total_incl_tax") for r in group
                         if r.get("total_incl_tax") is not None]
         best_total = max(group_totals) if group_totals else None
         if best_total is not None and primary.get("total_incl_tax") != best_total:
             _append_note(primary,
-                         f"金额按刷卡实付(含小费) {best_total} 取值，票面 {primary['total_incl_tax']}")
+                         f"金额按含小费终额 {best_total} 取值，本单据读数 "
+                         f"{primary['total_incl_tax']}")
             primary["total_incl_tax"] = best_total
+        # 互验：组内同时有发票与刷卡回执 → 金额得到独立单据印证。
+        # 全组金额精确一致 → 升为高置信；小费差额场景保持原置信但标注互验。
+        kinds = {r.get("doc_kind") for r in group}
+        if {"invoice", "card_slip"} <= kinds:
+            primary["slip_verified"] = True
+            exact_all = (best_total is not None
+                         and all(abs(t - best_total) <= 0.011 for t in group_totals))
+            if exact_all:
+                primary["confidence"] = "high"
+                _append_note(primary, "已与刷卡回执互验（金额一致）")
+            else:
+                _append_note(primary, "已与刷卡回执互验（回执印证印刷部分，终额含小费）")
         # 日期：优先用刷卡小票的机打日期（格式统一，几乎无歧义）
         slip_dates = [d.get("invoice_date") for d in dups
                       if d.get("doc_kind") == "card_slip" and d.get("invoice_date")]

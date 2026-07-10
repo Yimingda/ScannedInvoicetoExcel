@@ -73,6 +73,14 @@ I18N = {
         "foot_l": "INVOICE/AUDIT · LOCAL OCR", "foot_r": "本地离线处理 · 数据不出本机",
         "pos": "REC {i} / {n}",
         "btn_prev": "← 上一张", "btn_skip": "跳过 →", "btn_confirm_next": "✓ 确认，下一张",
+        "btn_delete": "🗑 删除本条", "btn_restore": "↩ 恢复本条",
+        "deleted_panel": "本条已删除（不会导出）",
+        "verified_badge": "[✓✓] 已与刷卡回执互验",
+        "split_label": "识别错了？这一区其实是多张票：",
+        "split2": "拆成 2 张重识别", "split3": "拆成 3 张重识别",
+        "splitting": "拆分重识别中…（本地 OCR，约 10~30 秒）",
+        "split_fail": "拆分失败：{e}",
+        "m_deleted": "已删除",
         "done_all": "全部处理完毕", "back_first": "回到第 1 张",
         "m_confirmed": "已确认", "m_left": "待处理",
         "confirmed_badge": "[OK] 已确认",
@@ -128,6 +136,14 @@ I18N = {
         "foot_l": "INVOICE/AUDIT · LOCAL OCR", "foot_r": "processed locally · data never leaves this machine",
         "pos": "REC {i} / {n}",
         "btn_prev": "← Prev", "btn_skip": "Skip →", "btn_confirm_next": "✓ Confirm → next",
+        "btn_delete": "🗑 Delete", "btn_restore": "↩ Restore",
+        "deleted_panel": "Deleted (excluded from export)",
+        "verified_badge": "[✓✓] Verified vs card slip",
+        "split_label": "Wrong detection? This region holds multiple receipts:",
+        "split2": "Split into 2 & re-scan", "split3": "Split into 3 & re-scan",
+        "splitting": "Splitting & re-recognizing… (local OCR, ~10–30 s)",
+        "split_fail": "Split failed: {e}",
+        "m_deleted": "Deleted",
         "done_all": "All done", "back_first": "Back to first",
         "m_confirmed": "Confirmed", "m_left": "Remaining",
         "confirmed_badge": "[OK] CONFIRMED",
@@ -236,6 +252,7 @@ h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
 .ttag.ok{ background:var(--blue); color:#fff; border-color:var(--blue); }
 .ttag.review{ color:var(--amber); border-color:var(--amber); }
 .ttag.missing{ color:var(--red); border-color:var(--red); }
+.ttag.verified{ background:#0E7A46; color:#fff; border-color:#0E7A46; }
 .swx-src{ font-family:var(--mono); font-size:10.5px; color:var(--grey); letter-spacing:.04em; }
 .swx-guess{ font-family:var(--mono); font-size:11px; color:var(--blue); }
 
@@ -246,6 +263,11 @@ h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
 .swx-strip i{ width:18px; height:10px; border:1.5px solid var(--ink); display:block; background:#fff; }
 .swx-strip i.done{ background:var(--blue); border-color:var(--blue); }
 .swx-strip i.cur{ background:var(--ink); }
+.swx-strip i.del{ border-color:var(--line);
+    background:repeating-linear-gradient(45deg,#fff,#fff 2px,var(--line) 2px,var(--line) 4px); }
+.swx-delpanel{ border:1.5px dashed var(--red); background:#fff; padding:18px 22px;
+    color:var(--red); font-weight:700; font-family:var(--mono); letter-spacing:.06em;
+    margin-bottom:14px; }
 .swx-done{ border:1.5px solid var(--blue); background:#fff; box-shadow:6px 6px 0 var(--blue);
            padding:26px; text-align:center; font-weight:800; font-size:22px; color:var(--blue);
            letter-spacing:.04em; margin:8px 0 16px; font-family:var(--mono); }
@@ -409,6 +431,7 @@ if run:
     st.session_state["records"] = records
     st.session_state["logs"] = logs
     st.session_state["tpl_bytes"] = tpl_file.getvalue() if tpl_file else None
+    st.session_state["run_cfg"] = run_cfg   # 拆分重识别沿用本次运行的设置
 
 
 # ----------------------------------------------------------------- 逐张确认（翻页向导）
@@ -464,6 +487,32 @@ def _date_suggestions(i: int) -> list:
     return out[:3]
 
 
+def _apply_split(i: int, parts: int):
+    """把第 i 条记录的区域裁切图强制拆成 N 段重识别，替换为 N 条新记录。"""
+    records = st.session_state["records"]
+    cfg_run = st.session_state.get("run_cfg") or load_cfg()
+    new_recs = pipeline.resplit_crop(records[i]["_crop_path"], parts, cfg_run)
+    records[i:i + 1] = new_recs
+    pipeline.enrich_review(records)
+    old, old_n = st.session_state["review"], st.session_state["review_n"]
+    ns = {j: old[j] for j in range(i)}
+    for k in range(len(new_recs)):
+        rr = records[i + k]
+        ns[i + k] = {"date": rr.get("_date_default", "") or "",
+                     "amount": rr.get("_amount_default"),
+                     "confirmed": bool(rr.get("_confirm_default", False)),
+                     "deleted": False}
+    for j in range(i + 1, old_n):
+        ns[j + len(new_recs) - 1] = old[j]
+    st.session_state["review"] = ns
+    st.session_state["review_n"] = len(records)
+    import re as _re
+    for k2 in list(st.session_state.keys()):
+        if _re.match(r"^(pg_(dt|am)|chip)_", k2):
+            del st.session_state[k2]
+    st.session_state["idx"] = i
+
+
 def render_wizard_card(i: int, r: dict, mode: str, store: dict):
     status = r.get("_status", "review")
     if store[i]["confirmed"]:
@@ -472,6 +521,8 @@ def render_wizard_card(i: int, r: dict, mode: str, store: dict):
         badge = {"ok": t("st_ok"), "review": t("st_review"),
                  "missing": t("st_missing")}[status]
         tag_html = f'<span class="ttag {status}">{_TAG_CODE[status]} {badge}</span>'
+    if r.get("slip_verified"):
+        tag_html += f'&nbsp;<span class="ttag verified">{t("verified_badge")}</span>'
     with st.container(border=False, key=f"wiz_{status}"):
         c_img, c_val = st.columns([2, 3])
         with c_img:
@@ -483,6 +534,21 @@ def render_wizard_card(i: int, r: dict, mode: str, store: dict):
                     unsafe_allow_html=True)
             st.markdown(f'<span class="swx-src">{r.get("source_file", "")}</span>',
                         unsafe_allow_html=True)
+            # 拆分重识别：自动分割把多张票并成一张时的人工纠错
+            if r.get("_crop_path") and Path(r["_crop_path"]).exists():
+                st.markdown(f'<span class="swx-src">{t("split_label")}</span>',
+                            unsafe_allow_html=True)
+                s2, s3 = st.columns(2)
+                do2 = s2.button(t("split2"), key=f"sp2_{i}", width="stretch")
+                do3 = s3.button(t("split3"), key=f"sp3_{i}", width="stretch")
+                if do2 or do3:
+                    with st.spinner(t("splitting")):
+                        try:
+                            _apply_split(i, 2 if do2 else 3)
+                        except Exception as e:
+                            st.error(t("split_fail", e=e))
+                        else:
+                            st.rerun()
         with c_val:
             st.markdown(
                 tag_html + f'&nbsp;<span class="swx-src">conf={r.get("confidence", "")}</span>',
@@ -532,7 +598,8 @@ if records:
         st.session_state["review"] = {
             i: {"date": r.get("_date_default", "") or "",
                 "amount": r.get("_amount_default"),
-                "confirmed": bool(r.get("_confirm_default", False))}
+                "confirmed": bool(r.get("_confirm_default", False)),
+                "deleted": False}
             for i, r in enumerate(records)}
         st.session_state["review_n"] = n
         st.session_state["idx"] = next(
@@ -540,12 +607,18 @@ if records:
     store = st.session_state["review"]
     idx = min(max(int(st.session_state.get("idx", 0)), 0), n)   # idx==n 表示全部走完
 
-    n_confirmed = sum(1 for v in store.values() if v["confirmed"])
+    n_deleted = sum(1 for v in store.values() if v.get("deleted"))
+    n_valid = n - n_deleted
+    n_confirmed = sum(1 for v in store.values()
+                      if v["confirmed"] and not v.get("deleted"))
+    del_html = (f'<div class="swx-m"><b>{n_deleted}</b><span>{t("m_deleted")}</span></div>'
+                if n_deleted else "")
     st.markdown(
         f'''<div class="swx-metrics">
-              <div class="swx-m"><b>{n}</b><span>{t("m_total")}</span></div>
+              <div class="swx-m"><b>{n_valid}</b><span>{t("m_total")}</span></div>
               <div class="swx-m blue"><b>{n_confirmed}</b><span>{t("m_confirmed")}</span></div>
-              <div class="swx-m"><b>{n - n_confirmed}</b><span>{t("m_left")}</span></div>
+              <div class="swx-m"><b>{n_valid - n_confirmed}</b><span>{t("m_left")}</span></div>
+              {del_html}
             </div>''', unsafe_allow_html=True)
 
     # 位置行 + 进度条（蓝=已确认，黑=当前，白=待处理）
@@ -563,9 +636,14 @@ if records:
                        value=min(idx + 1, n), key="jump_box",
                        on_change=_jump, label_visibility="collapsed")
 
-    strip = "".join(
-        f'<i class="{"cur" if i == idx else ("done" if store[i]["confirmed"] else "")}"></i>'
-        for i in range(n))
+    def _cell(i):
+        if i == idx:
+            return "cur"
+        if store[i].get("deleted"):
+            return "del"
+        return "done" if store[i]["confirmed"] else ""
+
+    strip = "".join(f'<i class="{_cell(i)}"></i>' for i in range(n))
     st.markdown(f'<div class="swx-strip">{strip}</div>', unsafe_allow_html=True)
 
     if idx >= n:
@@ -575,11 +653,33 @@ if records:
         if st.button(t("back_first")):
             st.session_state["idx"] = 0
             st.rerun()
+    elif store[idx].get("deleted"):
+        # 已删除的记录：只给恢复与前后翻页
+        st.markdown(f'<div class="swx-delpanel">🗑 {t("deleted_panel")} · '
+                    f'{records[idx].get("source_file", "")}</div>',
+                    unsafe_allow_html=True)
+        d_prev, d_rest, d_next = st.columns([1, 2, 1])
+        if d_prev.button(t("btn_prev"), disabled=idx == 0, width="stretch"):
+            st.session_state["idx"] = idx - 1
+            st.rerun()
+        if d_rest.button(t("btn_restore"), type="primary", width="stretch"):
+            store[idx]["deleted"] = False
+            st.rerun()
+        if d_next.button(t("btn_skip"), width="stretch"):
+            st.session_state["idx"] = idx + 1
+            st.rerun()
     else:
         st.caption(t("review_help"))
         render_wizard_card(idx, records[idx], mode, store)
 
-        b_prev, b_skip, b_ok = st.columns([1, 1, 2])
+        def _next_active(start):
+            """下一张未确认且未删除的；找不到则完成态。"""
+            for j in list(range(start, n)) + list(range(n)):
+                if not store[j]["confirmed"] and not store[j].get("deleted"):
+                    return j
+            return n
+
+        b_prev, b_skip, b_del, b_ok = st.columns([1, 1, 1, 2])
         if b_prev.button(t("btn_prev"), disabled=idx == 0, width="stretch"):
             _save_current(idx)
             st.session_state["idx"] = idx - 1
@@ -588,13 +688,16 @@ if records:
             _save_current(idx)
             st.session_state["idx"] = idx + 1
             st.rerun()
+        if b_del.button(t("btn_delete"), width="stretch"):
+            _save_current(idx)
+            store[idx]["deleted"] = True
+            store[idx]["confirmed"] = False
+            st.session_state["idx"] = _next_active(idx + 1)
+            st.rerun()
         if b_ok.button(t("btn_confirm_next"), type="primary", width="stretch"):
             _save_current(idx)
             store[idx]["confirmed"] = True
-            # 跳到下一张未确认的（先向后找，再从头找），没有则进完成态
-            nxt = next((j for j in range(idx + 1, n) if not store[j]["confirmed"]),
-                       next((j for j in range(n) if not store[j]["confirmed"]), n))
-            st.session_state["idx"] = nxt
+            st.session_state["idx"] = _next_active(idx + 1)
             st.rerun()
 
     # ----------------- 导出（读进度存储，不依赖控件状态） -----------------
@@ -602,6 +705,8 @@ if records:
     export, confirmed = [], 0
     for i in range(n):
         v = store[i]
+        if v.get("deleted"):
+            continue   # 已删除：不导出、不计数
         d = (v["date"] or "").strip() if i != idx else \
             (st.session_state.get(f"pg_dt_{i}", v["date"]) or "").strip()
         a = v["amount"] if i != idx else st.session_state.get(f"pg_am_{i}", v["amount"])
@@ -614,7 +719,7 @@ if records:
         export.append({"invoice_date": d or None,
                        "total_incl_tax": None if a is None else float(a)})
 
-    st.caption(t("confirmed_count", c=confirmed, t=n))
+    st.caption(t("confirmed_count", c=confirmed, t=n_valid))
     if export:
         try:
             wb = excel_writer.build_workbook(
