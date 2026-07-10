@@ -1,4 +1,4 @@
-"""InvoiceScanner —— Streamlit 可视化界面（双语 / 逐张确认）。
+"""InvoiceScanner —— Streamlit 可视化界面（双语 / 逐张确认 / 自动开始）。
 
 流程：选语言与解析模式 → 上传发票 → 一键识别 → 逐张卡片确认（左票右值，
 较确信默认勾选，空字段按上下文猜测预填）→ 下载填好的 Excel。
@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import io
 import tempfile
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -47,6 +48,8 @@ I18N = {
         "tpl_hint": "留空则用默认/通用模板；列映射见 config.yaml。",
         "uploader": "拖入发票文件（图片 / 扫描 PDF / 电子 PDF，可多选）",
         "run": "🚀 开始识别", "selected_n": "已选择 {n} 个文件",
+        "auto_msg": "页面无操作，{s} 秒后自动开始识别",
+        "auto_cancel": "取消自动",
         "processing": "识别中 {done}/{total} … {name}",
         "m_total": "识别出记录", "m_review": "需确认", "m_ok": "较确信",
         "review_title": "逐张确认",
@@ -110,6 +113,8 @@ I18N = {
         "tpl_hint": "Leave empty to use the default/generic template; see config.yaml for column mapping.",
         "uploader": "Drop invoice files (image / scanned PDF / digital PDF, multiple allowed)",
         "run": "🚀 Recognize", "selected_n": "{n} file(s) selected",
+        "auto_msg": "Auto-starting in {s}s unless you interact",
+        "auto_cancel": "Cancel auto",
         "processing": "Recognizing {done}/{total} … {name}",
         "m_total": "Records", "m_review": "Need review", "m_ok": "Confident",
         "review_title": "Confirm each receipt",
@@ -210,6 +215,11 @@ h1,h2,h3{ letter-spacing:-.01em; color:var(--ink); }
 [class*="st-key-chip_"] button{ font-family:var(--mono) !important; font-size:12px !important;
     min-height:30px !important; padding:2px 10px !important;
     box-shadow:2px 2px 0 var(--line) !important; }
+
+/* 自动开始倒计时 */
+.swx-auto{ font-family:var(--mono); font-size:12px; letter-spacing:.08em;
+           color:var(--blue); border:1.5px dashed var(--blue); background:#fff;
+           padding:8px 14px; }
 
 /* 页脚 */
 .swx-foot{ margin-top:46px; border-top:1.5px solid var(--line); padding-top:11px;
@@ -398,6 +408,43 @@ run = c_run.button(t("run"), type="primary", disabled=not uploads, width="stretc
 if uploads:
     c_info.info(t("selected_n", n=len(uploads)))
 
+# ----------------------------------------------------------------- 自动开始
+# 上传后 30 秒无操作即自动识别。任何「操作」（换文件/调设置）都会重置倒计时；
+# 已识别过的同一批文件不再自动触发。用 run_every 片段实现每秒倒计时，
+# 不阻塞页面，可随时取消或直接点「开始识别」。
+AUTO_DELAY_S = 30
+_fp = tuple((f.name, f.size) for f in uploads) if uploads else None
+_sig = (st.session_state.get("quality"), dpi, st.session_state.get("parse_mode"),
+        st.session_state.get("date_order"), dedup_on, bool(tpl_file))
+
+if uploads and _fp != st.session_state.get("done_fp"):
+    if (st.session_state.get("auto_fp") != _fp
+            or st.session_state.get("auto_sig") != _sig):
+        # 新上传或设置变动 → 重置倒计时并解除取消状态
+        st.session_state["auto_fp"] = _fp
+        st.session_state["auto_sig"] = _sig
+        st.session_state["auto_deadline"] = time.time() + AUTO_DELAY_S
+        st.session_state.pop("auto_cancelled", None)
+
+    if not st.session_state.get("auto_cancelled"):
+        @st.fragment(run_every=1.0)
+        def _auto_countdown():
+            left = int(st.session_state.get("auto_deadline", 0) - time.time())
+            if left <= 0:
+                st.session_state["do_auto_run"] = True
+                st.rerun(scope="app")
+            a1, a2 = st.columns([4, 1])
+            a1.markdown(
+                f'<div class="swx-auto">⏱ {t("auto_msg", s=max(left, 0))}</div>',
+                unsafe_allow_html=True)
+            if a2.button(t("auto_cancel"), key="auto_cancel_btn", width="stretch"):
+                st.session_state["auto_cancelled"] = True
+                st.rerun(scope="app")
+
+        _auto_countdown()
+
+run = (run or st.session_state.pop("do_auto_run", False)) and bool(uploads)
+
 if run:
     warm_engine()
     run_cfg = dict(cfg)
@@ -431,6 +478,10 @@ if run:
     st.session_state["records"] = records
     st.session_state["logs"] = logs
     st.session_state["tpl_bytes"] = tpl_file.getvalue() if tpl_file else None
+    # 本批已识别：解除自动倒计时（同一批文件不再自动触发）
+    st.session_state["done_fp"] = _fp
+    for _k in ("auto_fp", "auto_sig", "auto_deadline", "auto_cancelled"):
+        st.session_state.pop(_k, None)
     st.session_state["run_cfg"] = run_cfg   # 拆分重识别沿用本次运行的设置
 
 
