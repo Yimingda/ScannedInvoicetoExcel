@@ -435,17 +435,22 @@ if uploads:
 
 # ----------------------------------------------------------------- 自动开始
 # 上传后 30 秒无操作即自动识别。任何「操作」（换文件/调设置）都会重置倒计时；
-# 已识别过的同一批文件不再自动触发。用 run_every 片段实现每秒倒计时，
-# 不阻塞页面，可随时取消或直接点「开始识别」。
+# 已识别过的同一批文件不再自动触发；自动触发只此一次（熄火后须手动点按钮）。
+#
+# ⚠️ 关键次序：必须先算出本轮是否要开始识别(run)，再决定是否渲染倒计时片段。
+# 若识别进行中仍注册 run_every 片段，1 秒后片段会触发全页重跑、把正在跑的
+# 识别拦腰打断，进入「无限自我打断」——页面对一切点击失去响应。
 AUTO_DELAY_S = 30
 _fp = tuple((f.name, f.size) for f in uploads) if uploads else None
 _sig = (st.session_state.get("quality"), dpi, st.session_state.get("parse_mode"),
         st.session_state.get("date_order"), dedup_on, bool(tpl_file))
 
-if uploads and _fp != st.session_state.get("done_fp"):
+run = (run or st.session_state.pop("do_auto_run", False)) and bool(uploads)
+
+if uploads and not run and _fp != st.session_state.get("done_fp"):
     if (st.session_state.get("auto_fp") != _fp
             or st.session_state.get("auto_sig") != _sig):
-        # 新上传或设置变动 → 重置倒计时并解除取消状态
+        # 新上传或设置变动 → 重置倒计时并解除熄火状态
         st.session_state["auto_fp"] = _fp
         st.session_state["auto_sig"] = _sig
         st.session_state["auto_deadline"] = time.time() + AUTO_DELAY_S
@@ -456,6 +461,8 @@ if uploads and _fp != st.session_state.get("done_fp"):
         def _auto_countdown():
             left = int(st.session_state.get("auto_deadline", 0) - time.time())
             if left <= 0:
+                # 熄火再触发：同一批文件只自动一次，中途被打断也不会循环重启
+                st.session_state["auto_cancelled"] = True
                 st.session_state["do_auto_run"] = True
                 st.rerun(scope="app")
             a1, a2 = st.columns([4, 1])
@@ -468,9 +475,11 @@ if uploads and _fp != st.session_state.get("done_fp"):
 
         _auto_countdown()
 
-run = (run or st.session_state.pop("do_auto_run", False)) and bool(uploads)
-
 if run:
+    # 识别即将开始：清空倒计时残留，确保本轮及后续重跑不再有定时器捣乱
+    for _k in ("auto_fp", "auto_sig", "auto_deadline"):
+        st.session_state.pop(_k, None)
+    st.session_state["auto_cancelled"] = True
     warm_engine()
     run_cfg = dict(cfg)
     run_cfg["ocr"] = dict(run_cfg.get("ocr", {}), pdf_render_dpi=dpi)
