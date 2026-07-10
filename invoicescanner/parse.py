@@ -119,6 +119,10 @@ def amounts_in_row(text: str) -> List[Tuple[float, str, Optional[str]]]:
             continue
         if any(s <= m.start("num") < e for s, e in dspans):
             continue  # 数字在日期片段内（如年份 2026）
+        if m.start() > 0 and text[m.start() - 1] == "-":
+            continue  # 负数=折扣/减免行（SAVE 15% -101.94），不是总额候选
+        if m.start() > 0 and text[m.start() - 1] == "*":
+            continue  # 卡号掩码尾巴（479012******0821），不是金额
         frag = m.group(0).strip()
         try:
             val = float(m.group("num").replace(",", ""))
@@ -430,19 +434,33 @@ TIP_RATIO_MAX = 1.35   # 刷卡金额最多超票面总额 35%（覆盖常见 10
 
 
 def _apply_tendered(total, conf, notes, tendered):
-    """若实付/刷卡金额 > 票面总额且在小费合理范围内，以实付为准（含小费）。"""
+    """实付/刷卡金额仲裁。
+
+    - 实付略大于票面（≤1.35×）：小费场景，按含小费实付取值。
+    - 实付远大于票面（>1.35×）：小费解释不通——票面总额几乎必是误读
+      （折扣行/邻票渗入/OCR 碎裂被当成 total），刷卡行是票面上最可信的
+      结构化金额，按实付取值并注明，置信度 medium 交人工过目。
+    """
     if total is None or not tendered:
         return total, conf, notes
     cand = max(t["value"] for t in tendered)
     if total < cand <= total * TIP_RATIO_MAX:
         notes.append(f"实付/刷卡 {cand} > 票面 {total}，按含小费实付金额取值")
         return cand, ("high" if conf == "high" else "medium"), notes
+    if cand > total * TIP_RATIO_MAX:
+        notes.append(f"实付/刷卡 {cand} 与所选票面总额 {total} 严重不符(>1.35×)，"
+                     f"票面读数疑似误读，按刷卡实付取值")
+        return cand, "medium", notes
     return total, conf, notes
 
 
 def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
                tendered=None, tip_positions=None):
-    """核心：从候选中挑出「带税总金额」，返回 (值, 置信度, 备注)。"""
+    """核心：从候选中挑出「带税总金额」。
+
+    返回 (值, 置信度, 备注, 印刷总额, 来源)。来源='fallback' 表示无任何
+    关键词支撑、纯兜底取的最大金额——供上游判定「残影/碎片记录」。
+    """
     tendered = tendered or []
     # 仅在有税前小计时做求和校验（增值税「已含税」场景下 税+小费 无意义）
     parts = [v for v in (subtotal, tax, tip) if v is not None]
@@ -450,6 +468,7 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
     notes: List[str] = []
 
     val = conf = None
+    src = "kw"   # 默认按关键词体系选出
 
     # 增值税发票：价税合计 关键词直接命中即为含税总额
     for c in candidates:
@@ -464,15 +483,17 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
             # 无 total 标签但有实付/刷卡行：实付即最终支付额（含小费）
             val, conf = max(t["value"] for t in tendered), "medium"
             notes.append("无 total 标签，按实付/刷卡金额取值")
+            src = "tendered"
         else:
             # 兜底：优先带小数点/币种的金额（裸整数多为编号/门牌等噪声）
             decimal_pool = [a for a, _f, _c, no_sep in all_amounts if not no_sep]
             pool = decimal_pool or [a for a, _f, _c, _n in all_amounts]
             pool = [a for a in pool if subtotal is None or a >= subtotal - 0.01] or pool
             if not pool:
-                return None, "low", "未找到任何金额", None
+                return None, "low", "未找到任何金额", None, "none"
             val, conf = max(pool), "low"
             notes.append("无 total 标签，兜底取最大合理金额")
+            src = "fallback"
 
     # 1) 优先选与 subtotal+tax+tip 最接近的候选
     if val is None and expected is not None and expected > 0:
@@ -553,8 +574,11 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
                     conf = "medium"
 
     # 4) 实付/刷卡金额覆盖：报销口径 = 实际支付（含小费），优先级最高
+    _before = val
     val, conf, notes = _apply_tendered(val, conf, notes, tendered)
-    return val, conf, "; ".join(notes), printed_total
+    if val != _before:
+        src = "tendered"
+    return val, conf, "; ".join(notes), printed_total, src
 
 
 # ---------------------------------------------------------------- 单据种类（发票 vs 刷卡小票）
@@ -573,12 +597,18 @@ _CARD_MASK_RE = re.compile(r"\*{2,}\s*\d{4}")
 
 
 def detect_doc_kind(full_text: str) -> str:
-    """区分正式票据(invoice)与刷卡小票(card_slip)。"""
+    """区分正式票据(invoice)与刷卡小票(card_slip)。
+
+    零售发票（TAX INVOICE）常在票尾印支付明细（PURCHASE/RRN/卡号…），
+    会撞上刷卡特征词——有发票头时提高判定门槛，避免整张发票被当回执。
+    """
     low = full_text.lower()
     hits = sum(1 for k in _CARD_SLIP_KWS if k in low)
-    if hits >= 2:
+    has_inv_header = bool(_RECEIPT_HEADER_RE.search(_canon_kw(full_text)))
+    threshold = 4 if has_inv_header else 2
+    if hits >= threshold:
         return "card_slip"
-    if hits == 1 and _CARD_MASK_RE.search(full_text):
+    if hits == 1 and not has_inv_header and _CARD_MASK_RE.search(full_text):
         return "card_slip"
     return "invoice"
 
@@ -637,6 +667,20 @@ def split_stacked_receipts(lines: List[Dict[str, Any]],
 def parse_invoice(lines: List[Dict[str, Any]], kw: Dict[str, List[str]],
                   date_hint: List[str], date_order: str = "dmy") -> Dict[str, Any]:
     rows = cluster_rows(lines)
+
+    # 币种 R 被 OCR 读成 8（R206.10 -> 8206.10）：仅当本区金额普遍带 R 前缀
+    # （≥3 处）时，把「总额/实付关键词行」或「纯金额行」里紧贴小数金额的
+    # 孤立前导 8 还原为 R。条件收得很紧，避免误伤真正以 8 开头的金额
+    # （R8,123.45 这类带 R 的不受影响——前面是字母 R 不匹配）。
+    _pre_text = "\n".join(r["text"] for r in rows)
+    if len(re.findall(r"R\s?\d{1,3}[.,]\d", _pre_text)) >= 3:
+        _fix8 = re.compile(r"(?<![\w.,])8(?=\d{1,3}\.\d{2}(?!\d))")
+        _tot_kws = kw.get("total", []) + kw.get("tendered", [])
+        for r in rows:
+            if (re.fullmatch(r"\s*8\d{1,3}\.\d{2}\s*", r["text"])
+                    or _has_kw(r["text"].lower(), _tot_kws)):
+                r["text"] = _fix8.sub("R", r["text"])
+
     full_text = "\n".join(r["text"] for r in rows)
     all_amounts = [t for r in rows for t in amounts_in_row(r["text"])]
 
@@ -664,9 +708,16 @@ def parse_invoice(lines: List[Dict[str, Any]], kw: Dict[str, List[str]],
                 date_candidates.append(c)
 
     subtotal, tax, tip, candidates, tendered, tip_positions = classify_rows(rows, kw)
-    total, conf, notes, printed_total = pick_total(
+    total, conf, notes, printed_total, total_src = pick_total(
         subtotal, tax, tip, candidates, all_amounts, invoice_type,
         tendered, tip_positions)
+    # 「像钱」证据：存在带小数点/币种的金额，或任一关键词字段命中。
+    # 两者皆无（只有裸整数）的区域多为条码/单号纸条，不是票据。
+    has_money_amt = any((not no_sep) or cur
+                        for _v, _f, cur, no_sep in all_amounts)
+    kw_evidence = bool(candidates or tendered) or any(
+        x is not None for x in (subtotal, tax, tip))
+    moneyish = has_money_amt or kw_evidence
 
     return {
         "invoice_type": invoice_type,
@@ -681,4 +732,6 @@ def parse_invoice(lines: List[Dict[str, Any]], kw: Dict[str, List[str]],
         "printed_total": printed_total,
         "confidence": conf,
         "notes": notes,
+        "_total_src": total_src,
+        "_moneyish": moneyish,
     }

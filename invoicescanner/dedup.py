@@ -105,7 +105,10 @@ def _same_transaction(a: Dict[str, Any], b: Dict[str, Any],
     if dm is True:
         return "dup"
     if dm is None:
-        # 金额相同但缺日期：不敢确认，交人工
+        # 金额精确一致的 发票↔刷卡回执 对，一方日期不可读：合并（回执的
+        # 机打日期可靠，合并后按回执取日期）。同类单据仍只标疑似交人工。
+        if cross:
+            return "dup"
         return "suspect"
     if cross and _dates_match(a, b, SUSPECT_GAP_DAYS):
         return "suspect_gap"

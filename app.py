@@ -540,9 +540,13 @@ def _save_current(i: int):
 
 
 def _fill_date(i: int, val: str):
-    """候选日期一键填入：写进度存储并清掉控件旧值，让输入框重新取值。"""
+    """候选日期一键填入。
+
+    必须直接写控件的 session key（Streamlit 认可的回调内改值方式），
+    前端输入框才会同步刷新；只 pop 键在真实浏览器端不生效（AppTest
+    测不出，线上会表现为「点了没反应」）。"""
     st.session_state["review"][i]["date"] = val
-    st.session_state.pop(f"pg_dt_{i}", None)
+    st.session_state[f"pg_dt_{i}"] = val
 
 
 def _date_suggestions(i: int) -> list:
@@ -639,8 +643,11 @@ def render_wizard_card(i: int, r: dict, mode: str, store: dict):
                 tag_html + f'&nbsp;<span class="swx-src">conf={r.get("confidence", "")}</span>',
                 unsafe_allow_html=True)
             f1, f2 = st.columns(2)
-            f1.text_input(t("col_date"), value=store[i]["date"],
-                          placeholder="YYYY-MM-DD", key=f"pg_dt_{i}")
+            # 缺键才播种（不传 value=）：chip 回调直接写本键即可同步前端，
+            # 且避免「default value 与 Session State 同用」警告
+            if f"pg_dt_{i}" not in st.session_state:
+                st.session_state[f"pg_dt_{i}"] = store[i]["date"]
+            f1.text_input(t("col_date"), placeholder="YYYY-MM-DD", key=f"pg_dt_{i}")
             if r.get("_date_guessed"):
                 f1.markdown(
                     f'<span class="swx-guess">↖ {t("guess_" + (r.get("_date_guess_src") or "batch"))}</span>',

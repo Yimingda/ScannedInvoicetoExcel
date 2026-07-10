@@ -121,6 +121,20 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         for rno, (region, crop) in enumerate(split_regions, 1):
             rec = parse.parse_invoice(region, kw, kw.get("date_hint", []),
                                       date_order=date_order)
+            # 非票据碎片：整个区域读不出任何金额、任何日期（宣传页脚/会员
+            # 广告小条等）——没有任何可导出的字段，产出记录只是噪音。
+            # 真正褪色的票至少能读出金额或日期之一，不受影响。
+            if (rec.get("total_incl_tax") is None
+                    and rec.get("subtotal") is None
+                    and rec.get("tax") is None and rec.get("tip") is None
+                    and rec.get("invoice_date") is None
+                    and not rec.get("date_candidates")):
+                continue
+            # 条码/单号纸条：只有裸整数（店号/流水号被兜底当金额）、无任何
+            # 关键词与「像钱」的金额——即便带日期也不是票据（如收银条码条）。
+            if (rec.get("_total_src") == "fallback"
+                    and not rec.get("_moneyish")):
+                continue
             suffix = (f" 第{pno}页-区{rno}"
                       if (len(pages) > 1 or len(split_regions) > 1) else "")
             rec["source_file"] = f"{path.name}{suffix}"
@@ -129,6 +143,21 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 rec["_crop_path"] = _save_crop(crop, crop_dir,
                                                f"{path.stem}_p{pno}_r{rno}")
             records.append(rec)
+
+    # 同一裁切图上的「残影」：refine 细分偶尔把同一张票拆出一个只剩杂讯的
+    # 兄弟组（金额纯兜底、低置信）。同图存在关键词站得住的兄弟时，残影只是
+    # 把同一张图再呈现一次、配上垃圾金额——丢弃。
+    by_crop: Dict[Any, list] = {}
+    for r in records:
+        if r.get("_crop_path"):
+            by_crop.setdefault(r["_crop_path"], []).append(r)
+    records = [r for r in records
+               if not (r.get("_crop_path")
+                       and len(by_crop.get(r["_crop_path"], [])) > 1
+                       and r.get("_total_src") == "fallback"
+                       and r.get("confidence") == "low"
+                       and any(s.get("_total_src") not in (None, "fallback", "none")
+                               for s in by_crop[r["_crop_path"]] if s is not r))]
     return records
 
 
