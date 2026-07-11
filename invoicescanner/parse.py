@@ -187,8 +187,12 @@ def _edit_dist(a: str, b: str, cap: int = 2) -> int:
 
 
 def _month_from_token(token: str) -> Optional[int]:
-    """月份名匹配，容忍 OCR 误读（Harch->March 等，编辑距离<=2 只对全称）。"""
-    t = token.lower().strip(".")
+    """月份名匹配，容忍 OCR 误读（Harch->March 等，编辑距离<=2 只对全称）。
+
+    大写 I 先还原为 l（JuI->Jul）：正确大小写的月份名里大写 I 不会出现在
+    词中，而真有字母 i 的月份（April 等）i 在第 4 位起，[:3] 前缀查找不受影响。
+    """
+    t = token.replace("I", "l").lower().strip(".")
     t = t.replace("0", "o").replace("1", "l")
     if t[:3] in _MONTHS:
         return _MONTHS[t[:3]]
@@ -207,15 +211,20 @@ _DATE_PATTERNS = [
     (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})"), "ab_y4"),
     # 19/03/26 / 25-03-26 —— 两位年份（yy -> 20yy）
     (re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?!\d)"), "ab_y2"),
-    # Jul 9, 2026 / July 09 2026
+    # 月份名 token：允许 OCR 把 l/I 读成 1、o 读成 0（Ju1/JuI/N0v），
+    #   仍要求首字符是字母；有效性由 _month_from_token 把关。
+    # 日-年分隔：允许 「, 」「,无空格」「. 」（逗号常被读成句点）或纯空格。
     # 四位年后不许紧跟数字，防「2020|15」抓错年——但允许紧跟「时间形」(202611:24)
-    (re.compile(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})(?:(?=\d{1,2}:\d{2})|(?!\d))"), "Mdy"),
+    # Jul 9, 2026 / July 09 2026 / Ju1 5. 2026 / Jul 5,2026
+    (re.compile(r"\b([A-Za-z][A-Za-z01Il]{2,8})\.?\s+(\d{1,2})(?:\s*[.,]\s*|\s+)(\d{4})"
+                r"(?:(?=\d{1,2}:\d{2})|(?!\d))"), "Mdy"),
     # 9 Jul 2026 / 29 March 2026 / 15 March 202611:24
-    (re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})(?:(?=\d{1,2}:\d{2})|(?!\d))"), "dMy"),
+    (re.compile(r"\b(\d{1,2})\s+([A-Za-z][A-Za-z01Il]{2,8})\.?(?:\s*[.,]\s*|\s+)(\d{4})"
+                r"(?:(?=\d{1,2}:\d{2})|(?!\d))"), "dMy"),
     # 30 Mar'26 —— 撇号明确标记两位年，后面可紧跟时间（OCR 常粘连 "Mar'2608:47"）
-    (re.compile(r"\b(\d{1,2})\s*([A-Za-z]{3,9})\.?\s*'\s*(\d{2})"), "dMy2"),
+    (re.compile(r"\b(\d{1,2})\s*([A-Za-z][A-Za-z01Il]{2,8})\.?\s*'\s*(\d{2})"), "dMy2"),
     # 30 Mar 26 —— 无撇号的两位年，后面不许紧跟数字
-    (re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{2})(?!\d)"), "dMy2"),
+    (re.compile(r"\b(\d{1,2})\s+([A-Za-z][A-Za-z01Il]{2,8})\.?,?\s+(\d{2})(?!\d)"), "dMy2"),
 ]
 
 

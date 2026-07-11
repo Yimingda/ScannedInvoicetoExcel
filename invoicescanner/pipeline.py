@@ -76,6 +76,8 @@ def process_file(path: Path, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                             xs0 = min(l["box"][0] for l in g)
                             xs1 = max(l["box"][2] for l in g)
                             region_w = (xs1 - xs0) / dpi_scale
+                        # 剥离邻票渗入的残边（裁切边缘的斜置/版面外内容）
+                        lines = segment.strip_edge_bleed(lines)
                         for sub in segment.refine_wide_region(lines, region_w):
                             regions.append((sub, crop))
             if not regions and seg_enabled:
@@ -210,7 +212,7 @@ def resplit_crop(crop_path: str, parts: int, cfg: Dict[str, Any]) -> List[Dict[s
             x1 = min(w, int(w * (k + 1) / parts) + int(0.02 * w))
             band = img[:, x0:x1]
         band = np.ascontiguousarray(band)
-        lines = ocr.recognize(band)
+        lines = segment.strip_edge_bleed(ocr.recognize(band))
         rec = parse.parse_invoice(lines or [], kw, kw.get("date_hint", []),
                                   date_order)
         rec["source_file"] = f"{base.stem} 手动拆分{k + 1}/{parts}"

@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "boxing-game",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "D:/AI工作台/MotionBoxing", "-p", "8371", "-c-1", "--silent"],
+      "port": 8371
+    },
+    {
       "name": "invoice-ui",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.port", "8501", "--server.headless", "true"],

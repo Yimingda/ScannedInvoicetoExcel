@@ -207,6 +207,50 @@ def _merge_vertical(boxes: List[List[int]], gap: int) -> List[List[int]]:
 WIDE_REGION_PX = 680   # 200dpi 下 ~8.6cm，超过它的区域大概率是两张小票贴在一起
 
 
+def strip_edge_bleed(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """剥离「邻票渗入」：裁切边缘混进来的另一张（不完整）票的残边。
+
+    残边的两个强特征（同时保守使用，宁可漏删不误删）：
+      a) 版面外：主体包络由「较宽的结构行」定出；整体落在包络之外、
+         且自身很窄的行，是贴着裁切边的外来内容；
+      b) 角度异类：摆正后的本票行接近同一角度；与主体角度差 >=12° 且
+         偏离版面中心的行，是斜着渗入的邻票。
+    删除量超过 40% 时放弃剥离（版面假设不成立，保持原样）。
+    """
+    boxes = [l for l in lines if l.get("text", "").strip()]
+    if len(boxes) < 8:
+        return lines
+    widths = sorted(b["box"][2] - b["box"][0] for b in boxes)
+    w_main = widths[int(len(widths) * 0.8)]
+    # 结构行（宽度 >= 0.55 主宽）定包络
+    struct = [b for b in boxes if (b["box"][2] - b["box"][0]) >= 0.55 * w_main]
+    if len(struct) < 3:
+        return lines
+    env_l = min(b["box"][0] for b in struct) - 6
+    env_r = max(b["box"][2] for b in struct) + 6
+    env_c = (env_l + env_r) / 2
+    env_w = env_r - env_l
+    angles = [b.get("angle") for b in boxes
+              if isinstance(b.get("angle"), (int, float))]
+    a_med = median(angles) if angles else 0.0
+
+    kept, dropped = [], 0
+    for b in boxes:
+        x0, x1 = b["box"][0], b["box"][2]
+        w = x1 - x0
+        outside = (x1 < env_l or x0 > env_r) and w < 0.5 * w_main
+        ang = b.get("angle")
+        tilted = (isinstance(ang, (int, float)) and abs(ang - a_med) >= 12
+                  and abs((x0 + x1) / 2 - env_c) > 0.3 * env_w)
+        if outside or tilted:
+            dropped += 1
+            continue
+        kept.append(b)
+    if dropped == 0 or dropped > 0.4 * len(boxes):
+        return lines
+    return kept
+
+
 def refine_wide_region(lines: List[Dict[str, Any]],
                        region_w: float) -> List[List[Dict[str, Any]]]:
     """对「过宽」区域（两张以上小票贴死在一起）按 OCR 框做两级细分：
