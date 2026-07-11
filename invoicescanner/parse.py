@@ -582,6 +582,25 @@ def pick_total(subtotal, tax, tip, candidates, all_amounts, invoice_type,
                 if conf == "high":
                     conf = "medium"
 
+    # 3b) 切边票费用验算：票左缘被裁掉时 Service Fee/Amount Due 的标签残缺，
+    #     关键词全部失灵——但算式仍在。若「当前总额 + 池中某费用 = 池中
+    #     最大金额」精确成立（费用 ≤35%），最大值即含费终额（Amount Due）。
+    #     y 限定为池内最大且带小数的金额，巧合概率极低。
+    if val is not None and invoice_type != "vat":
+        pool_dec = [round(a, 2) for a, _f, _c, ns in all_amounts if not ns]
+        if pool_dec:
+            ymax = max(pool_dec)
+            fee = round(ymax - val, 2)
+            if (0 < fee <= val * 0.35
+                    and any(abs(a - fee) <= 0.02 for a in pool_dec)):
+                notes.append(f"费用验算：{val} + {fee} = {ymax}"
+                             f"（服务费/应付标签疑似被裁），按含费终额取值")
+                if printed_total is None:
+                    printed_total = val
+                val = ymax
+                if conf == "high":
+                    conf = "medium"
+
     # 4) 实付/刷卡金额覆盖：报销口径 = 实际支付（含小费），优先级最高
     _before = val
     val, conf, notes = _apply_tendered(val, conf, notes, tendered)
